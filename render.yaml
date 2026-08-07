@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: freshsales-mcp-server
+    env: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRESHSALES_API_KEY
+        sync: false
+      - key: FRESHSALES_DOMAIN
+        sync: false
+      - key: FRESHSALES_DEFAULT_LEADS_VIEW_ID
+        sync: false
+      - key: FRESHSALES_DEFAULT_DEALS_VIEW_ID
+        sync: false
+      - key: MCP_SERVER_TOKEN
+        sync: false
+      - key: DAILY_CALL_LIMIT
+        value: "200"
+      - key: APPROVAL_TTL_SECONDS
+        value: "300"
+      - key: RESET_TIMEZONE
+        value: UTC
+      - key: MCP_ALLOWED_ORIGINS
+        value: https://claude.ai
+      - key: MCP_ALLOWED_HOSTS
+        sync: false
+      - key: FRESHSALES_MAX_429_RETRIES
+        value: "1"
+      - key: FRESHSALES_MAX_RETRY_WAIT_MS
+        value: "2000"
+      - key: LOCAL_RATE_LIMIT_PER_MINUTE
+        value: "60"
+      - key: PIPELINE_SUMMARY_MAX_PAGES
+        value: "5"
