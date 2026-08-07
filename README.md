@@ -21,7 +21,8 @@ Copy `.env.example` to `.env` locally and set:
 - `FRESHSALES_DOMAIN`: Freshsales domain, for example `https://example.myfreshworks.com`.
 - `FRESHSALES_DEFAULT_LEADS_VIEW_ID`: Freshsales leads view id used by `list_leads`.
 - `FRESHSALES_DEFAULT_DEALS_VIEW_ID`: Freshsales deals view id used by `list_deals` and `pipeline_summary`.
-- `MCP_SERVER_TOKEN`: Optional bearer token required by `/mcp` when set.
+- `OAUTH_CLIENT_ID`: Static OAuth client id for Claude custom connector setup.
+- `OAUTH_CLIENT_SECRET`: Static OAuth client secret for Claude custom connector setup.
 - `DAILY_CALL_LIMIT`: Hard Freshsales API call cap per reset window, default `200`.
 - `APPROVAL_TTL_SECONDS`: Approval request lifetime, default `300`.
 - `RESET_TIMEZONE`: Midnight reset timezone, default `UTC`.
@@ -59,7 +60,8 @@ http://localhost:3000/mcp
 2. In Render, create a new Blueprint from the repo. Render will read `render.yaml`.
 3. Set the secret env vars marked `sync: false` in `render.yaml`.
 4. Set `MCP_ALLOWED_HOSTS` to your Render hostname, for example `freshsales-mcp-server.onrender.com`.
-5. Deploy and verify `https://your-service.onrender.com/health`.
+5. Set `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` to random static values that you will also enter in Claude.
+6. Deploy and verify `https://your-service.onrender.com/health`.
 
 Render Free web services can spin down after idle periods. The server still works correctly without a keep-alive, but the first Claude tool call after idle may wait through a cold start.
 
@@ -92,6 +94,11 @@ Register the deployed endpoint as a custom MCP connector in Claude:
 
 - URL: `https://your-service.onrender.com/mcp`
 - Transport: Streamable HTTP
-- Authorization header: `Bearer <MCP_SERVER_TOKEN>` if `MCP_SERVER_TOKEN` is set
+- Advanced settings OAuth Client ID: the exact `OAUTH_CLIENT_ID` value from Render.
+- Advanced settings OAuth Client Secret: the exact `OAUTH_CLIENT_SECRET` value from Render.
+
+When you click Connect, Claude discovers the server's OAuth metadata at `/.well-known/oauth-authorization-server`, redirects through `/authorize`, exchanges the code at `/token`, then calls `/mcp` with its issued OAuth token. You do not need to enter a manual `Authorization: Bearer ...` header in Claude. This OAuth shim is intentionally single-owner and in-memory; if the server restarts, reconnect the Claude connector.
+
+For non-Claude MCP clients only, `MCP_SERVER_TOKEN` remains supported as an optional direct bearer credential if you choose to set it.
 
 For every tool, first call without `approved: true`, review the returned `request_id` and preview, then call the same tool with `approved: true` and `request_id`.

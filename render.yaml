@@ -17,7 +17,9 @@ services:
         sync: false
       - key: FRESHSALES_DEFAULT_DEALS_VIEW_ID
         sync: false
-      - key: MCP_SERVER_TOKEN
+      - key: OAUTH_CLIENT_ID
+        sync: false
+      - key: OAUTH_CLIENT_SECRET
         sync: false
       - key: DAILY_CALL_LIMIT
         value: "200"

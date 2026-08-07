@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
@@ -19,6 +20,8 @@ const config: AppConfig = {
   defaultLeadsViewId: "lead-view",
   defaultDealsViewId: "deal-view",
   mcpServerToken: "mcp-secret",
+  oauthClientId: "claude-client",
+  oauthClientSecret: "claude-secret",
   dailyCallLimit: 200,
   approvalTtlSeconds: 300,
   resetTimeZone: "UTC",
@@ -48,30 +51,137 @@ describe("health endpoint", () => {
   });
 });
 
+describe("OAuth shim", () => {
+  it("discovers endpoints, exchanges a code, and accepts the OAuth bearer for MCP", async () => {
+    const handleRequest = vi.fn(async (_req, res) => {
+      res.end(JSON.stringify({ ok: true }));
+    });
+    const app = createHttpApp({
+      config,
+      logger,
+      transport: { handleRequest } as never
+    });
+
+    const metadata = await invokeApp(app, {
+      method: "GET",
+      url: "/.well-known/oauth-authorization-server",
+      headers: {
+        host: "freshworks-mcp.onrender.com",
+        "x-forwarded-proto": "https"
+      }
+    });
+    expect(metadata.statusCode).toBe(200);
+    expect(metadata.body).toMatchObject({
+      issuer: "https://freshworks-mcp.onrender.com",
+      authorization_endpoint: "https://freshworks-mcp.onrender.com/authorize",
+      token_endpoint: "https://freshworks-mcp.onrender.com/token"
+    });
+
+    const authorize = await invokeApp(app, {
+      method: "GET",
+      url: "/authorize?response_type=code&client_id=claude-client&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=abc",
+      headers: {
+        host: "freshworks-mcp.onrender.com",
+        "x-forwarded-proto": "https"
+      }
+    });
+    expect(authorize.statusCode).toBe(302);
+    const redirect = new URL(String(authorize.headers.get("location")));
+    expect(redirect.searchParams.get("state")).toBe("abc");
+
+    const token = await invokeApp(app, {
+      method: "POST",
+      url: "/token",
+      headers: {
+        authorization: `Basic ${Buffer.from("claude-client:claude-secret").toString("base64")}`,
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: redirect.searchParams.get("code") ?? "",
+        redirect_uri: "https://claude.ai/api/mcp/auth_callback"
+      }).toString()
+    });
+    expect(token.statusCode).toBe(200);
+    expect(token.body).toMatchObject({
+      token_type: "Bearer",
+      scope: "freshsales.read"
+    });
+
+    const mcp = await invokeApp(app, {
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        authorization: `Bearer ${String(token.body.access_token)}`,
+        "content-type": "application/json"
+      },
+      body: "{}"
+    });
+    expect(mcp.statusCode).toBe(200);
+    expect(handleRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
 async function invokeHealth(app: ReturnType<typeof createHttpApp>): Promise<{
   statusCode: number;
   body: { status?: string; server_time?: string };
 }> {
-  const request = Object.assign(new EventEmitter(), {
+  const response = await invokeApp(app, {
     method: "GET",
-    url: "/health",
-    headers: {},
+    url: "/health"
+  });
+
+  return {
+    statusCode: response.statusCode,
+    body: response.body as { status?: string; server_time?: string }
+  };
+}
+
+async function invokeApp(app: ReturnType<typeof createHttpApp>, options: {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+}): Promise<{
+  statusCode: number;
+  headers: Map<string, string | number | readonly string[]>;
+  body: Record<string, unknown>;
+  text: string;
+}> {
+  const headers = {
+    ...(options.headers ?? {})
+  };
+  if (options.body && !headers["content-length"]) {
+    headers["content-length"] = String(Buffer.byteLength(options.body));
+  }
+
+  const request = Object.assign(Readable.from(options.body ? [Buffer.from(options.body)] : []), {
+    method: options.method,
+    url: options.url,
+    headers,
     connection: {}
   });
 
   const chunks: Buffer[] = [];
-  const headers = new Map<string, string | number | readonly string[]>();
+  const responseHeaders = new Map<string, string | number | readonly string[]>();
   const response = Object.assign(new EventEmitter(), {
     statusCode: 200,
     setHeader(name: string, value: string | number | readonly string[]) {
-      headers.set(name.toLowerCase(), value);
+      responseHeaders.set(name.toLowerCase(), value);
       return response;
     },
     getHeader(name: string) {
-      return headers.get(name.toLowerCase());
+      return responseHeaders.get(name.toLowerCase());
     },
     removeHeader(name: string) {
-      headers.delete(name.toLowerCase());
+      responseHeaders.delete(name.toLowerCase());
+    },
+    write(chunk?: string | Buffer) {
+      if (chunk) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+
+      return true;
     },
     end(chunk?: string | Buffer) {
       if (chunk) {
@@ -91,8 +201,18 @@ async function invokeHealth(app: ReturnType<typeof createHttpApp>): Promise<{
     expressApp.handle(request, response, reject);
   });
 
+  const rawBody = Buffer.concat(chunks).toString("utf8");
+  let body: Record<string, unknown> = {};
+  try {
+    body = rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {};
+  } catch {
+    body = {};
+  }
+
   return {
     statusCode: response.statusCode,
-    body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as { status?: string; server_time?: string }
+    headers: responseHeaders,
+    body,
+    text: rawBody
   };
 }

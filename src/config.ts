@@ -11,6 +11,8 @@ const envSchema = z.object({
   FRESHSALES_DEFAULT_LEADS_VIEW_ID: z.string().min(1),
   FRESHSALES_DEFAULT_DEALS_VIEW_ID: z.string().min(1),
   MCP_SERVER_TOKEN: z.string().min(1).optional(),
+  OAUTH_CLIENT_ID: z.string().min(1).optional(),
+  OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
   DAILY_CALL_LIMIT: z.coerce.number().int().min(1).default(200),
   APPROVAL_TTL_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
   RESET_TIMEZONE: z.string().min(1).default("UTC"),
@@ -39,6 +41,8 @@ export interface AppConfig {
   defaultLeadsViewId: string;
   defaultDealsViewId: string;
   mcpServerToken?: string;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
   dailyCallLimit: number;
   approvalTtlSeconds: number;
   resetTimeZone: string;
@@ -66,6 +70,8 @@ export function getConfig(): AppConfig {
     defaultLeadsViewId: env.FRESHSALES_DEFAULT_LEADS_VIEW_ID,
     defaultDealsViewId: env.FRESHSALES_DEFAULT_DEALS_VIEW_ID,
     mcpServerToken: env.MCP_SERVER_TOKEN,
+    oauthClientId: env.OAUTH_CLIENT_ID,
+    oauthClientSecret: env.OAUTH_CLIENT_SECRET,
     dailyCallLimit: env.DAILY_CALL_LIMIT,
     approvalTtlSeconds: env.APPROVAL_TTL_SECONDS,
     resetTimeZone: env.RESET_TIMEZONE,

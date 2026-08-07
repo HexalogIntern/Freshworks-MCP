@@ -9,12 +9,14 @@ import { createHttpApp } from "./mcp/http.js";
 import { createMcpServer } from "./mcp/server.js";
 import { ApprovalStore } from "./state/approvalStore.js";
 import { DailyUsageTracker } from "./state/dailyUsageTracker.js";
+import { OAuthStore } from "./state/oauthStore.js";
 import { createLogger } from "./utils/logging.js";
 
 export async function bootstrap() {
   const config = getConfig();
   const logger = createLogger();
   const approvalStore = new ApprovalStore();
+  const oauthStore = new OAuthStore();
   const usageTracker = new DailyUsageTracker(config);
   const freshsales = new FreshsalesClient({
     config,
@@ -42,7 +44,8 @@ export async function bootstrap() {
   const app = createHttpApp({
     config,
     logger,
-    transport
+    transport,
+    oauthStore
   });
 
   const httpServer = createServer(app);
