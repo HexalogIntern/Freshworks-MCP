@@ -1,7 +1,11 @@
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 
-loadEnv();
+// `quiet: true` suppresses dotenv's promotional startup banner (it prints a
+// random "tip" line, including dotenvx ads, on every injection by default).
+// Render injects real env vars directly in production, so this call mostly
+// no-ops there anyway, but we still keep it quiet everywhere for clean logs.
+loadEnv({ quiet: true });
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -21,7 +25,9 @@ const envSchema = z.object({
   FRESHSALES_MAX_429_RETRIES: z.coerce.number().int().min(0).max(3).default(1),
   FRESHSALES_MAX_RETRY_WAIT_MS: z.coerce.number().int().min(100).max(5000).default(2000),
   LOCAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(60),
-  PIPELINE_SUMMARY_MAX_PAGES: z.coerce.number().int().min(1).max(10).default(5)
+  PIPELINE_SUMMARY_MAX_PAGES: z.coerce.number().int().min(1).max(10).default(5),
+  FRESHSALES_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
+  MCP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(25000)
 });
 
 function normalizeDomain(domain: string): string {
@@ -52,6 +58,8 @@ export interface AppConfig {
   maxRetryWaitMs: number;
   localRateLimitPerMinute: number;
   pipelineSummaryMaxPages: number;
+  freshsalesRequestTimeoutMs: number;
+  mcpRequestTimeoutMs: number;
 }
 
 export function getConfig(): AppConfig {
@@ -80,7 +88,9 @@ export function getConfig(): AppConfig {
     max429Retries: env.FRESHSALES_MAX_429_RETRIES,
     maxRetryWaitMs: env.FRESHSALES_MAX_RETRY_WAIT_MS,
     localRateLimitPerMinute: env.LOCAL_RATE_LIMIT_PER_MINUTE,
-    pipelineSummaryMaxPages: env.PIPELINE_SUMMARY_MAX_PAGES
+    pipelineSummaryMaxPages: env.PIPELINE_SUMMARY_MAX_PAGES,
+    freshsalesRequestTimeoutMs: env.FRESHSALES_REQUEST_TIMEOUT_MS,
+    mcpRequestTimeoutMs: env.MCP_REQUEST_TIMEOUT_MS
   };
 }
 

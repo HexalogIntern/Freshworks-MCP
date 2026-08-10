@@ -30,7 +30,9 @@ const config: AppConfig = {
   max429Retries: 1,
   maxRetryWaitMs: 2000,
   localRateLimitPerMinute: 60,
-  pipelineSummaryMaxPages: 5
+  pipelineSummaryMaxPages: 5,
+  freshsalesRequestTimeoutMs: 10000,
+  mcpRequestTimeoutMs: 25000
 };
 
 describe("health endpoint", () => {
@@ -48,6 +50,82 @@ describe("health endpoint", () => {
     expect(body.status).toBe("ok");
     expect(body.server_time).toBeTypeOf("string");
     expect(handleRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("request logging", () => {
+  it("logs method, path, status, and duration for /health without touching the transport", async () => {
+    const info = vi.fn();
+    const app = createHttpApp({
+      config,
+      logger: { info, warn: vi.fn(), error: vi.fn() },
+      transport: { handleRequest: vi.fn() } as never
+    });
+
+    await invokeHealth(app);
+
+    expect(info).toHaveBeenCalledWith(
+      "http_request",
+      expect.objectContaining({ method: "GET", path: "/health", status: 200 })
+    );
+    const [, fields] = info.mock.calls[0] as [string, Record<string, unknown>];
+    expect(fields.duration_ms).toBeTypeOf("number");
+  });
+
+  it("logs the MCP method and tool name for /mcp tool calls without logging params or bodies", async () => {
+    const info = vi.fn();
+    const handleRequest = vi.fn(async (_req, res) => {
+      res.end(JSON.stringify({ ok: true }));
+    });
+    const app = createHttpApp({
+      config,
+      logger: { info, warn: vi.fn(), error: vi.fn() },
+      transport: { handleRequest } as never
+    });
+
+    await invokeApp(app, {
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        authorization: "Bearer mcp-secret",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "list_leads", arguments: { secret_looking_field: "should-not-be-logged" } }
+      })
+    });
+
+    const mcpLogCall = info.mock.calls.find(call => call[1]?.path === "/mcp");
+    expect(mcpLogCall?.[1]).toMatchObject({ mcp_method: "tools/call", tool: "list_leads", status: 200 });
+    expect(JSON.stringify(mcpLogCall)).not.toContain("should-not-be-logged");
+  });
+});
+
+describe("/mcp request timeout", () => {
+  it("responds with REQUEST_TIMEOUT instead of hanging when the transport never resolves", async () => {
+    const shortTimeoutConfig: AppConfig = { ...config, mcpRequestTimeoutMs: 30 };
+    const handleRequest = vi.fn(() => new Promise(() => {})); // simulates a hang deep in the transport
+    const app = createHttpApp({
+      config: shortTimeoutConfig,
+      logger,
+      transport: { handleRequest } as never
+    });
+
+    const response = await invokeApp(app, {
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        authorization: "Bearer mcp-secret",
+        "content-type": "application/json"
+      },
+      body: "{}"
+    });
+
+    expect(response.statusCode).toBe(504);
+    expect(response.body).toMatchObject({ error: { code: "REQUEST_TIMEOUT" } });
   });
 });
 

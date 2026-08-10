@@ -38,6 +38,8 @@ export function createHttpApp({ config, logger, transport, oauthStore = new OAut
     next();
   });
 
+  app.use(requestLogging(logger));
+
   app.get("/health", (_req, res) => {
     res.json({
       status: "ok",
@@ -151,13 +153,41 @@ export function createHttpApp({ config, logger, transport, oauthStore = new OAut
   });
 
   app.all("/mcp", authenticate(config, oauthStore), async (req, res, next) => {
+    // Belt-and-braces: everything downstream (the Freshsales client, the
+    // MCP transport itself) should already resolve or reject well within
+    // this window. If some future code path hangs anyway, this converts
+    // an infinite spinner on the client into a visible, well-formed error
+    // instead of leaving the connection open forever.
+    let settled = false;
+    const timeoutTimer = setTimeout(() => {
+      if (settled || res.headersSent) {
+        return;
+      }
+
+      settled = true;
+      logger.error("mcp_request_timeout", { path: "/mcp", timeout_ms: config.mcpRequestTimeoutMs });
+      res.status(504).json(errorPayload("REQUEST_TIMEOUT", "The MCP request did not complete within the allotted time."));
+    }, config.mcpRequestTimeoutMs);
+
     try {
       await transport.handleRequest(
         req as IncomingMessage & { auth?: AuthInfo },
         res as ServerResponse,
         req.body
       );
+      settled = true;
+      clearTimeout(timeoutTimer);
     } catch (error) {
+      clearTimeout(timeoutTimer);
+      if (settled || res.headersSent) {
+        // The timeout already responded (or the transport already started
+        // writing a response) before this rejection surfaced; there is
+        // nothing safe left to send.
+        logger.error("mcp_request_failed_after_response_sent", { path: "/mcp" });
+        return;
+      }
+
+      settled = true;
       next(error);
     }
   });
@@ -267,6 +297,59 @@ function toTokenResponse(tokenSet: {
     refresh_token: tokenSet.refreshToken,
     scope: "freshsales.read"
   };
+}
+
+// Structured request logging for /health and /mcp. Deliberately never logs
+// request or response bodies (tool params and CRM data may be sensitive) -
+// only method, path, status, timing, and, for /mcp, which JSON-RPC method
+// and (for tool calls) which tool name was invoked.
+function requestLogging(logger: Logger) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (req.path !== "/health" && req.path !== "/mcp") {
+      next();
+      return;
+    }
+
+    const startedAt = process.hrtime.bigint();
+
+    res.on("finish", () => {
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      const fields: Record<string, unknown> = {
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        duration_ms: Math.round(durationMs * 100) / 100
+      };
+
+      if (req.path === "/mcp") {
+        const mcpInfo = extractMcpInfo(req.body);
+        if (mcpInfo.mcpMethod) {
+          fields.mcp_method = mcpInfo.mcpMethod;
+        }
+        if (mcpInfo.toolName) {
+          fields.tool = mcpInfo.toolName;
+        }
+      }
+
+      logger.info("http_request", fields);
+    });
+
+    next();
+  };
+}
+
+function extractMcpInfo(body: unknown): { mcpMethod?: string; toolName?: string } {
+  const entry = Array.isArray(body) ? body[0] : body;
+  if (!entry || typeof entry !== "object") {
+    return {};
+  }
+
+  const record = entry as { method?: unknown; params?: { name?: unknown } };
+  const mcpMethod = typeof record.method === "string" ? record.method : undefined;
+  const toolName =
+    mcpMethod === "tools/call" && typeof record.params?.name === "string" ? record.params.name : undefined;
+
+  return { mcpMethod, toolName };
 }
 
 function applyCors(req: Request, res: Response, config: AppConfig): void {

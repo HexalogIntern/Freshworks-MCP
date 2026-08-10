@@ -33,6 +33,8 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     maxRetryWaitMs: 2000,
     localRateLimitPerMinute: 60,
     pipelineSummaryMaxPages: 5,
+    freshsalesRequestTimeoutMs: 10000,
+    mcpRequestTimeoutMs: 25000,
     ...overrides
   };
 }
@@ -234,5 +236,34 @@ describe("daily usage and Freshsales client", () => {
     });
 
     await expect(client.get("/api/leads/view/lead-view")).rejects.toThrow("failed with [REDACTED] and [REDACTED]");
+  });
+
+  it("times out instead of hanging forever when the upstream connection stalls", async () => {
+    const appConfig = config({ freshsalesRequestTimeoutMs: 50 });
+    const tracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));
+    // Mirrors real fetch/undici behavior: the network call never resolves
+    // on its own (simulating a stuck upstream), but it does honor AbortSignal.
+    const fetchImpl = vi.fn(
+      (_url: unknown, options?: { signal?: AbortSignal }) =>
+        new Promise<Response>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => {
+            const error = new Error("This operation was aborted");
+            error.name = "AbortError";
+            reject(error);
+          });
+        })
+    );
+    const client = new FreshsalesClient({
+      config: appConfig,
+      usageTracker: tracker,
+      logger,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => new Date("2026-08-07T10:00:00.000Z")
+    });
+
+    await expect(client.get("/api/leads/1")).rejects.toMatchObject({
+      code: "FRESHSALES_TIMEOUT",
+      status: 504
+    });
   });
 });

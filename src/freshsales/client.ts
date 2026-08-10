@@ -55,14 +55,7 @@ export class FreshsalesClient implements FreshsalesClientLike {
     while (true) {
       this.deps.usageTracker.recordCall(this.now());
 
-      const response = await this.fetchImpl(url, {
-        method: "GET",
-        headers: {
-          Authorization: `Token token=${this.deps.config.freshsalesApiKey}`,
-          "Content-Type": "application/json",
-          Accept: "application/json"
-        }
-      });
+      const response = await this.fetchWithTimeout(url);
 
       const rateLimit = parseRateLimitHeaders(response.headers);
 
@@ -93,6 +86,41 @@ export class FreshsalesClient implements FreshsalesClientLike {
       }
 
       return (await response.json()) as T;
+    }
+  }
+
+  // Every outbound call gets an explicit deadline. Without this, a stuck
+  // upstream TCP connection (or a hung load balancer on Freshsales' side)
+  // leaves the fetch promise pending forever, which in turn leaves the
+  // /mcp request that awaited it hanging indefinitely with no response
+  // ever sent back to the client.
+  private async fetchWithTimeout(url: URL): Promise<Response> {
+    const timeoutMs = this.deps.config.freshsalesRequestTimeoutMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      return await this.fetchImpl(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Token token=${this.deps.config.freshsalesApiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        },
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+        throw new AppError(
+          "FRESHSALES_TIMEOUT",
+          `Freshsales request timed out after ${timeoutMs}ms.`,
+          504
+        );
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
