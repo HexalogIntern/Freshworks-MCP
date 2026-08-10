@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { emailFromRecord, getCollection, nameFromRecord, ownerNameFromRecord } from "../freshsales/mappers.js";
+import { emailFromRecord, extractSearchResults, nameFromRecord, ownerNameFromRecord } from "../freshsales/mappers.js";
 import { approvalFields, defineTool } from "./common.js";
 
 const schema = z
@@ -48,7 +48,9 @@ export const searchContactsTool = defineTool({
       }
     });
 
-    const results = getCollection(payload, "contacts").length > 0 ? getCollection(payload, "contacts") : getCollection(payload, "results");
+    ctx.logger.info("search_contacts_raw_shape", describeSearchPayloadShape(payload));
+
+    const results = extractSearchResults(payload);
     const contacts = results.map(contact => ({
       id: contact.id ?? null,
       name: nameFromRecord(contact),
@@ -66,3 +68,28 @@ export const searchContactsTool = defineTool({
   },
   willCallFreshsales: true
 });
+
+function describeSearchPayloadShape(payload: unknown): Record<string, unknown> {
+  if (Array.isArray(payload)) {
+    return {
+      payload_type: "array",
+      array_length: payload.length
+    };
+  }
+
+  if (payload !== null && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    return {
+      payload_type: "object",
+      object_keys: Object.keys(record),
+      contacts_is_array: Array.isArray(record.contacts),
+      contacts_length: Array.isArray(record.contacts) ? record.contacts.length : undefined,
+      results_is_array: Array.isArray(record.results),
+      results_length: Array.isArray(record.results) ? record.results.length : undefined
+    };
+  }
+
+  return {
+    payload_type: typeof payload
+  };
+}

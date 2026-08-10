@@ -6,6 +6,7 @@ import { ApprovalStore } from "../src/state/approvalStore.js";
 import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { listLeadsTool } from "../src/tools/listLeads.js";
+import { searchContactsTool } from "../src/tools/searchContacts.js";
 import { runTool, type ToolExecutionContext } from "../src/tools/common.js";
 import type { Logger } from "../src/types.js";
 import { AppError } from "../src/utils/errors.js";
@@ -317,6 +318,83 @@ describe("daily usage and Freshsales client", () => {
     await expect(client.get("/api/leads/1")).rejects.toMatchObject({
       code: "FRESHSALES_TIMEOUT",
       status: 504
+    });
+  });
+});
+
+describe("search contacts parsing", () => {
+  async function runApprovedSearch(payload: unknown) {
+    const get = vi.fn(async <T>() => payload as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(searchContactsTool, { query: "ada", page: 1, per_page: 25 }, ctx);
+    const approve = await runTool(searchContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    return { approve, get };
+  }
+
+  it("extracts contacts from a flat search array with nested contact records", async () => {
+    const { approve } = await runApprovedSearch([
+      {
+        id: 100,
+        entity_type: "contact",
+        contact: {
+          id: 1,
+          first_name: "Ada",
+          last_name: "Lovelace",
+          email: "ada@example.com"
+        }
+      }
+    ]);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 1, name: "Ada Lovelace", email: "ada@example.com" }]
+    });
+  });
+
+  it("extracts contacts from a contacts key", async () => {
+    const { approve } = await runApprovedSearch({
+      contacts: [{ id: 2, first_name: "Grace", last_name: "Hopper", email: "grace@example.com" }]
+    });
+
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 2, name: "Grace Hopper", email: "grace@example.com" }]
+    });
+  });
+
+  it("extracts contacts from a results key", async () => {
+    const { approve } = await runApprovedSearch({
+      results: [{ id: 3, first_name: "Katherine", last_name: "Johnson", email: "katherine@example.com" }]
+    });
+
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 3, name: "Katherine Johnson", email: "katherine@example.com" }]
+    });
+  });
+
+  it("extracts contacts from a data key", async () => {
+    const { approve } = await runApprovedSearch({
+      data: [{ id: 4, first_name: "Mary", last_name: "Jackson", email: "mary@example.com" }]
+    });
+
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 4, name: "Mary Jackson", email: "mary@example.com" }]
+    });
+  });
+
+  it("falls through when contacts is present but empty", async () => {
+    const { approve } = await runApprovedSearch({
+      contacts: [],
+      results: [{ id: 5, first_name: "Dorothy", last_name: "Vaughan", email: "dorothy@example.com" }]
+    });
+
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 5, name: "Dorothy Vaughan", email: "dorothy@example.com" }]
     });
   });
 });

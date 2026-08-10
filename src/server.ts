@@ -23,6 +23,7 @@ export async function bootstrap() {
     usageTracker,
     logger
   });
+  void logFreshsalesSanityCheck(freshsales, logger);
 
   const context = {
     config,
@@ -59,6 +60,40 @@ export async function bootstrap() {
       httpServer.close();
     }
   };
+}
+
+async function logFreshsalesSanityCheck(
+  freshsales: FreshsalesClient,
+  logger: ReturnType<typeof createLogger>
+): Promise<void> {
+  try {
+    const payload = await freshsales.get<Record<string, unknown>>("api/contacts", {
+      query: {
+        page: 1,
+        per_page: 1
+      }
+    });
+    logger.info("freshsales_sanity_check", {
+      contact_count: contactCountFromPayload(payload)
+    });
+  } catch (error) {
+    logger.warn("freshsales_sanity_check_failed", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function contactCountFromPayload(payload: Record<string, unknown>): number | null {
+  const meta = payload.meta;
+  if (meta !== null && typeof meta === "object") {
+    const total = (meta as Record<string, unknown>).total;
+    if (typeof total === "number") {
+      return total;
+    }
+  }
+
+  const total = payload.total;
+  return typeof total === "number" ? total : null;
 }
 
 const isDirectRun = process.argv[1] ? fileURLToPath(import.meta.url) === process.argv[1] : false;

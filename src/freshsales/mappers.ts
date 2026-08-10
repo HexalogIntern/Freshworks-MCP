@@ -26,6 +26,33 @@ export function getCollection<T extends string>(payload: Record<string, unknown>
   return asArray(payload[key]);
 }
 
+export function extractSearchResults(payload: unknown): Record<string, unknown>[] {
+  const payloadRecord = asRecord(payload);
+  const sources = [
+    asArray(payload),
+    asArray(payloadRecord.contacts),
+    asArray(payloadRecord.results),
+    asArray(payloadRecord.data)
+  ];
+  const firstPopulated = sources.find(source => source.length > 0) ?? [];
+
+  return firstPopulated.map(item => {
+    const entityType = stringValue(item.entity_type);
+    const nestedByEntityType = entityType ? asRecord(item[entityType]) : {};
+    const nestedContact = asRecord(item.contact);
+
+    if (Object.keys(nestedByEntityType).length > 0) {
+      return nestedByEntityType;
+    }
+
+    if (Object.keys(nestedContact).length > 0) {
+      return nestedContact;
+    }
+
+    return item;
+  });
+}
+
 export function nameFromRecord(record: Record<string, unknown>): string | null {
   return (
     stringValue(record.display_name) ??
