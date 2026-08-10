@@ -39,7 +39,7 @@ export const searchContactsTool = defineTool({
     return 1;
   },
   async execute(params, ctx) {
-    const payload = await ctx.freshsales.get<Record<string, unknown>>("/api/search", {
+    const payload = await ctx.freshsales.get<Record<string, unknown>>("api/search", {
       query: {
         q: params.query,
         include: "contact",

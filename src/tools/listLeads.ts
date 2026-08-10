@@ -45,7 +45,7 @@ export const listLeadsTool = defineTool({
       ? await resolveLeadViewId(ctx, params.filter)
       : ctx.config.defaultLeadsViewId;
 
-    const payload = await ctx.freshsales.get<Record<string, unknown>>(`/api/leads/view/${viewId}`, {
+    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/leads/view/${viewId}`, {
       query: {
         page: params.page,
         per_page: params.perPage,
@@ -75,7 +75,7 @@ export const listLeadsTool = defineTool({
 });
 
 async function resolveLeadViewId(ctx: ToolExecutionContext, filter: string): Promise<string> {
-  const payload = await ctx.freshsales.get<FilterPayload>("/api/leads/filters");
+  const payload = await ctx.freshsales.get<FilterPayload>("api/leads/filters");
   const matched = payload.filters?.find(candidate => {
     const id = candidate.id !== undefined ? String(candidate.id) : "";
     const name = candidate.name?.toLowerCase() ?? "";

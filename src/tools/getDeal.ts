@@ -31,7 +31,7 @@ export const getDealTool = defineTool({
     return 1;
   },
   async execute(params, ctx) {
-    const payload = await ctx.freshsales.get<Record<string, unknown>>(`/api/deals/${params.id}`, {
+    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/deals/${params.id}`, {
       query: {
         include: "owner,sales_account,contacts,deal_stage"
       }

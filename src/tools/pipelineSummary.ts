@@ -42,7 +42,7 @@ export const pipelineSummaryTool = defineTool({
     let truncated = false;
 
     for (let page = 1; page <= ctx.config.pipelineSummaryMaxPages; page += 1) {
-      const payload = await ctx.freshsales.get<Record<string, unknown>>(`/api/deals/view/${ctx.config.defaultDealsViewId}`, {
+      const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/deals/view/${ctx.config.defaultDealsViewId}`, {
         query: {
           page,
           per_page: perPage,

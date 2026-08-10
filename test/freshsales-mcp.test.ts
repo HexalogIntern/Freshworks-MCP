@@ -225,6 +225,27 @@ describe("daily usage and Freshsales client", () => {
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 
+  it("appends API paths to Freshsales domains that include /crm/sales", async () => {
+    const appConfig = config({ freshsalesDomain: "https://x.myfreshworks.com/crm/sales" });
+    const tracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));
+    let capturedUrl: string | undefined;
+    const fetchImpl = vi.fn(async (url: URL) => {
+      capturedUrl = url.toString();
+      return Response.json({ deal: { id: 1 } });
+    });
+    const client = new FreshsalesClient({
+      config: appConfig,
+      usageTracker: tracker,
+      logger,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => new Date("2026-08-07T10:00:00.000Z")
+    });
+
+    await client.get("api/deals/1");
+
+    expect(capturedUrl).toBe("https://x.myfreshworks.com/crm/sales/api/deals/1");
+  });
+
   it("redacts configured secrets from upstream error messages", async () => {
     const appConfig = config();
     const tracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));

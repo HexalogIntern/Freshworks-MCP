@@ -31,7 +31,7 @@ export const getLeadTool = defineTool({
     return 1;
   },
   async execute(params, ctx) {
-    const payload = await ctx.freshsales.get<Record<string, unknown>>(`/api/leads/${params.id}`, {
+    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/leads/${params.id}`, {
       query: {
         include: "owner"
       }

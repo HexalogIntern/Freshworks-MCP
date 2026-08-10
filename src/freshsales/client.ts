@@ -50,6 +50,8 @@ export class FreshsalesClient implements FreshsalesClientLike {
   }
 
   private async request<T>(path: string, options?: FreshsalesRequestOptions): Promise<T> {
+    // Tool paths must not start with "/" because Freshsales domains can include
+    // "/crm/sales"; absolute paths would make new URL() drop that base path.
     const url = new URL(path, `${this.deps.config.freshsalesDomain}/`);
     for (const [key, value] of Object.entries(options?.query ?? {})) {
       if (value !== undefined) {

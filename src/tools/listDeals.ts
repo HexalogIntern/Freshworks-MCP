@@ -56,7 +56,7 @@ export const listDealsTool = defineTool({
     return 1;
   },
   async execute(params, ctx) {
-    const payload = await ctx.freshsales.get<Record<string, unknown>>(`/api/deals/view/${ctx.config.defaultDealsViewId}`, {
+    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/deals/view/${ctx.config.defaultDealsViewId}`, {
       query: {
         page: params.page,
         per_page: params.perPage,

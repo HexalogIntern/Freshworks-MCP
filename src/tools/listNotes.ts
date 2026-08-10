@@ -50,7 +50,7 @@ export const listNotesTool = defineTool({
     return 1;
   },
   async execute(params, ctx) {
-    const path = `/api/${pathByEntityType[params.entityType]}/${params.entityId}`;
+    const path = `api/${pathByEntityType[params.entityType]}/${params.entityId}`;
     const payload = await ctx.freshsales.get<Record<string, unknown>>(path, {
       query: {
         include: "notes"
