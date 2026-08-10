@@ -113,9 +113,14 @@ export async function runTool<TInput extends ApprovalAwareInput, TResolved, TRes
       isError: false
     };
   } catch (error) {
+    const appErrorFields = error instanceof AppError
+      ? appErrorLogFields(error)
+      : {};
+
     ctx.logger.warn("tool_call_rejected", {
       tool: definition.name,
-      status: "error"
+      status: "error",
+      ...appErrorFields
     });
 
     return {
@@ -130,6 +135,32 @@ export async function runTool<TInput extends ApprovalAwareInput, TResolved, TRes
       isError: true
     };
   }
+}
+
+function appErrorLogFields(error: AppError): JsonRecord {
+  const enriched = error as AppError & {
+    upstreamContentType?: string | null;
+    upstreamBodySnippet?: string;
+    upstreamStatus?: number;
+  };
+  const fields: JsonRecord = {
+    code: error.code,
+    error_status: error.status
+  };
+
+  if (enriched.upstreamStatus !== undefined) {
+    fields.upstream_status = enriched.upstreamStatus;
+  }
+
+  if (enriched.upstreamContentType !== undefined) {
+    fields.upstream_content_type = enriched.upstreamContentType;
+  }
+
+  if (enriched.upstreamBodySnippet !== undefined) {
+    fields.upstream_body_snippet = enriched.upstreamBodySnippet;
+  }
+
+  return fields;
 }
 
 function toPreviewObject(value: unknown): Record<string, unknown> {

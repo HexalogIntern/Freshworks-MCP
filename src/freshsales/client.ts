@@ -28,6 +28,12 @@ interface FreshsalesErrorBody {
   message?: string;
 }
 
+interface UpstreamNonJsonDetails {
+  upstreamContentType: string | null;
+  upstreamBodySnippet: string;
+  upstreamStatus: number;
+}
+
 export class FreshsalesClient implements FreshsalesClientLike {
   private readonly fetchImpl: FetchLike;
   private readonly sleep: SleepFn;
@@ -85,6 +91,19 @@ export class FreshsalesClient implements FreshsalesClientLike {
         throw await this.buildHttpError(response);
       }
 
+      if (!isJsonResponse(response)) {
+        const details = await this.readNonJsonDetails(response);
+        this.logNonJsonResponse("freshsales_non_json_response", details);
+        throw withUpstreamDetails(
+          new AppError(
+            "UPSTREAM_NON_JSON",
+            "Freshsales returned a non-JSON response (likely an auth redirect or wrong FRESHSALES_DOMAIN) instead of API data.",
+            response.status
+          ),
+          details
+        );
+      }
+
       return (await response.json()) as T;
     }
   }
@@ -127,11 +146,20 @@ export class FreshsalesClient implements FreshsalesClientLike {
   private async buildHttpError(response: Response): Promise<AppError> {
     let body: FreshsalesErrorBody | undefined;
 
-    try {
-      body = (await response.json()) as FreshsalesErrorBody;
-    } catch {
-      body = undefined;
+    if (!isJsonResponse(response)) {
+      const details = await this.readNonJsonDetails(response);
+      this.logNonJsonResponse("freshsales_non_json_error_response", details);
+      return withUpstreamDetails(
+        new AppError(
+          "FRESHSALES_REQUEST_FAILED",
+          "Freshsales returned a non-JSON error response. Check the server-side credentials and FRESHSALES_DOMAIN.",
+          response.status
+        ),
+        details
+      );
     }
+
+    body = (await response.json()) as FreshsalesErrorBody;
 
     const rawMessage =
       body?.errors?.message ??
@@ -152,6 +180,45 @@ export class FreshsalesClient implements FreshsalesClientLike {
 
     return new AppError("FRESHSALES_REQUEST_FAILED", safeMessage, response.status);
   }
+
+  private async readNonJsonDetails(response: Response): Promise<UpstreamNonJsonDetails> {
+    const rawBody = await response.text();
+
+    return {
+      upstreamContentType: response.headers.get("content-type"),
+      upstreamBodySnippet: truncate(redactKnownSecrets(rawBody, this.deps.config), 500),
+      upstreamStatus: response.status
+    };
+  }
+
+  private logNonJsonResponse(event: string, details: UpstreamNonJsonDetails): void {
+    this.deps.logger.warn(event, {
+      upstream_status: details.upstreamStatus,
+      upstream_content_type: details.upstreamContentType,
+      upstream_body_snippet: details.upstreamBodySnippet
+    });
+  }
+}
+
+function isJsonResponse(response: Response): boolean {
+  return response.headers.get("content-type")?.toLowerCase().includes("application/json") === true;
+}
+
+function withUpstreamDetails(error: AppError, details: UpstreamNonJsonDetails): AppError {
+  const enriched = error as AppError & {
+    upstreamContentType?: string | null;
+    upstreamBodySnippet?: string;
+    upstreamStatus?: number;
+  };
+  enriched.upstreamContentType = details.upstreamContentType;
+  enriched.upstreamBodySnippet = details.upstreamBodySnippet;
+  enriched.upstreamStatus = details.upstreamStatus;
+
+  return error;
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
 function parseRateLimitHeaders(headers: Headers): FreshsalesRateLimitSnapshot {

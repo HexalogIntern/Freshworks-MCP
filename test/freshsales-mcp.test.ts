@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
 import { FreshsalesClient } from "../src/freshsales/client.js";
@@ -8,12 +8,17 @@ import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { listLeadsTool } from "../src/tools/listLeads.js";
 import { runTool, type ToolExecutionContext } from "../src/tools/common.js";
 import type { Logger } from "../src/types.js";
+import { AppError } from "../src/utils/errors.js";
 
 const logger: Logger = {
   info: vi.fn(),
   warn: vi.fn(),
   error: vi.fn()
 };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -238,6 +243,33 @@ describe("daily usage and Freshsales client", () => {
     await expect(client.get("/api/leads/view/lead-view")).rejects.toThrow("failed with [REDACTED] and [REDACTED]");
   });
 
+  it("rejects 2xx non-JSON upstream responses with a clear AppError", async () => {
+    const appConfig = config();
+    const tracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));
+    const fetchImpl = vi.fn(async () => new Response(
+      "<!doctype html><title>Login</title><p>freshsales-secret</p>",
+      { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }
+    ));
+    const client = new FreshsalesClient({
+      config: appConfig,
+      usageTracker: tracker,
+      logger,
+      fetchImpl,
+      now: () => new Date("2026-08-07T10:00:00.000Z")
+    });
+
+    await expect(client.get("/api/leads/view/lead-view")).rejects.toMatchObject({
+      code: "UPSTREAM_NON_JSON",
+      status: 200,
+      message: "Freshsales returned a non-JSON response (likely an auth redirect or wrong FRESHSALES_DOMAIN) instead of API data."
+    });
+    expect(logger.warn).toHaveBeenCalledWith("freshsales_non_json_response", {
+      upstream_status: 200,
+      upstream_content_type: "text/html; charset=utf-8",
+      upstream_body_snippet: "<!doctype html><title>Login</title><p>[REDACTED]</p>"
+    });
+  });
+
   it("times out instead of hanging forever when the upstream connection stalls", async () => {
     const appConfig = config({ freshsalesRequestTimeoutMs: 50 });
     const tracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));
@@ -264,6 +296,40 @@ describe("daily usage and Freshsales client", () => {
     await expect(client.get("/api/leads/1")).rejects.toMatchObject({
       code: "FRESHSALES_TIMEOUT",
       status: 504
+    });
+  });
+});
+
+describe("tool rejection logging", () => {
+  it("logs AppError code and status when a tool call is rejected", async () => {
+    const ctx = makeContext({
+      freshsales: {
+        get: vi.fn(async () => {
+          const error = new AppError("UPSTREAM_NON_JSON", "Freshsales returned a non-JSON response.", 200) as AppError & {
+            upstreamContentType?: string;
+            upstreamBodySnippet?: string;
+            upstreamStatus?: number;
+          };
+          error.upstreamContentType = "text/html";
+          error.upstreamBodySnippet = "<!doctype html><title>Login</title>";
+          error.upstreamStatus = 200;
+          throw error;
+        }) as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(listLeadsTool, { page: 1, per_page: 25 }, ctx);
+    const approve = await runTool(listLeadsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(true);
+    expect(logger.warn).toHaveBeenCalledWith("tool_call_rejected", {
+      tool: "list_leads",
+      status: "error",
+      code: "UPSTREAM_NON_JSON",
+      error_status: 200,
+      upstream_status: 200,
+      upstream_content_type: "text/html",
+      upstream_body_snippet: "<!doctype html><title>Login</title>"
     });
   });
 });
