@@ -21,8 +21,10 @@ export function errorPayload(code: string, message: string): ErrorPayload {
   };
 }
 
-export function redactKnownSecrets(value: string, config: Pick<AppConfig, "freshsalesApiKey" | "mcpServerToken">): string {
+export function redactKnownSecrets(value: unknown, config: Pick<AppConfig, "freshsalesApiKey" | "mcpServerToken">): string {
+  const text = typeof value === "string" ? value : String(value ?? "");
+
   return [config.freshsalesApiKey, config.mcpServerToken]
     .filter((candidate): candidate is string => Boolean(candidate))
-    .reduce((message, secret) => message.split(secret).join("[REDACTED]"), value);
+    .reduce((message, secret) => message.split(secret).join("[REDACTED]"), text);
 }

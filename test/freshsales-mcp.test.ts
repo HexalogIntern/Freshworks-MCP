@@ -9,7 +9,7 @@ import { listLeadsTool } from "../src/tools/listLeads.js";
 import { searchContactsTool } from "../src/tools/searchContacts.js";
 import { runTool, type ToolExecutionContext } from "../src/tools/common.js";
 import type { Logger } from "../src/types.js";
-import { AppError } from "../src/utils/errors.js";
+import { AppError, redactKnownSecrets } from "../src/utils/errors.js";
 
 const logger: Logger = {
   info: vi.fn(),
@@ -265,6 +265,28 @@ describe("daily usage and Freshsales client", () => {
     await expect(client.get("/api/leads/view/lead-view")).rejects.toThrow("failed with [REDACTED] and [REDACTED]");
   });
 
+  it("handles Freshsales error messages returned as arrays", async () => {
+    const appConfig = config();
+    const tracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify({ errors: { code: 403, message: ["You are not authorized to perform this operation."] } }),
+      { status: 403, headers: { "content-type": "application/json" } }
+    ));
+    const client = new FreshsalesClient({
+      config: appConfig,
+      usageTracker: tracker,
+      logger,
+      fetchImpl,
+      now: () => new Date("2026-08-07T10:00:00.000Z")
+    });
+
+    await expect(client.get("/api/leads/view/lead-view")).rejects.toMatchObject({
+      code: "AUTH_FAILED",
+      status: 403,
+      message: "Freshsales authentication failed. Check the server-side credentials."
+    });
+  });
+
   it("rejects 2xx non-JSON upstream responses with a clear AppError", async () => {
     const appConfig = config();
     const tracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));
@@ -319,6 +341,12 @@ describe("daily usage and Freshsales client", () => {
       code: "FRESHSALES_TIMEOUT",
       status: 504
     });
+  });
+});
+
+describe("error utilities", () => {
+  it("does not throw when redacting a non-string value", () => {
+    expect(redactKnownSecrets(["freshsales-secret", "visible"], config())).toBe("[REDACTED],visible");
   });
 });
 

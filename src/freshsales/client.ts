@@ -19,13 +19,13 @@ export interface FreshsalesClientDependencies {
 interface FreshsalesErrorBody {
   errors?: {
     code?: string | number;
-    message?: string;
+    message?: unknown;
   };
   error?: {
     code?: string | number;
-    message?: string;
+    message?: unknown;
   };
-  message?: string;
+  message?: unknown;
 }
 
 interface UpstreamNonJsonDetails {
@@ -163,12 +163,14 @@ export class FreshsalesClient implements FreshsalesClientLike {
 
     body = (await response.json()) as FreshsalesErrorBody;
 
+    const messageCandidate =
+      normalizeErrorMessage(body?.errors?.message) ??
+      normalizeErrorMessage(body?.error?.message) ??
+      normalizeErrorMessage(body?.message);
     const rawMessage =
-      body?.errors?.message ??
-      body?.error?.message ??
-      body?.message ??
-      response.statusText ??
-      "Freshsales request failed.";
+      typeof messageCandidate === "string"
+        ? messageCandidate
+        : response.statusText || "Freshsales request failed.";
 
     const safeMessage = redactKnownSecrets(rawMessage, this.deps.config);
 
@@ -217,6 +219,10 @@ function withUpstreamDetails(error: AppError, details: UpstreamNonJsonDetails): 
   enriched.upstreamStatus = details.upstreamStatus;
 
   return error;
+}
+
+function normalizeErrorMessage(value: unknown): unknown {
+  return Array.isArray(value) ? value.join("; ") : value;
 }
 
 function truncate(value: string, maxLength: number): string {
