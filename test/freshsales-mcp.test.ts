@@ -5,7 +5,8 @@ import { FreshsalesClient } from "../src/freshsales/client.js";
 import { ApprovalStore } from "../src/state/approvalStore.js";
 import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
-import { listLeadsTool } from "../src/tools/listLeads.js";
+import { getContactTool } from "../src/tools/getContact.js";
+import { listContactsTool } from "../src/tools/listContacts.js";
 import { searchContactsTool } from "../src/tools/searchContacts.js";
 import { runTool, type ToolExecutionContext } from "../src/tools/common.js";
 import type { Logger } from "../src/types.js";
@@ -27,7 +28,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     port: 3000,
     freshsalesApiKey: "freshsales-secret",
     freshsalesDomain: "https://example.myfreshworks.com",
-    defaultLeadsViewId: "lead-view",
+    defaultContactsViewId: "contact-view",
     defaultDealsViewId: "deal-view",
     mcpServerToken: "mcp-secret",
     dailyCallLimit: 200,
@@ -65,7 +66,7 @@ function makeContext(options: {
 }
 
 function mockFreshsales() {
-  const get = vi.fn(async <T>() => ({ leads: [] }) as T);
+  const get = vi.fn(async <T>() => ({ contacts: [] }) as T);
   const freshsales: FreshsalesClientLike = {
     get: get as unknown as FreshsalesClientLike["get"]
   };
@@ -90,12 +91,12 @@ describe("approval flow", () => {
     const { freshsales, get } = mockFreshsales();
     const ctx = makeContext({ freshsales });
 
-    const result = await runTool(listLeadsTool, { page: 1, per_page: 25 }, ctx);
+    const result = await runTool(listContactsTool, { page: 1, per_page: 25 }, ctx);
 
     expect(result.isError).toBe(false);
     expect(result.payload).toMatchObject({
       status: "pending_approval",
-      tool: "list_leads",
+      tool: "list_contacts",
       will_call_freshsales: true,
       estimated_call_count: 1
     });
@@ -107,7 +108,7 @@ describe("approval flow", () => {
     const appConfig = config();
     const now = new Date("2026-08-07T10:00:00.000Z");
     const usageTracker = new DailyUsageTracker(appConfig, now);
-    const fetchImpl = vi.fn(async () => Response.json({ leads: [{ id: 1, first_name: "Ada", last_name: "Lovelace" }] }));
+    const fetchImpl = vi.fn(async () => Response.json({ contacts: [{ id: 1, first_name: "Ada", last_name: "Lovelace" }] }));
     const freshsales = new FreshsalesClient({ config: appConfig, usageTracker, logger, fetchImpl, now: () => now });
     const ctx: ToolExecutionContext = {
       config: appConfig,
@@ -118,10 +119,10 @@ describe("approval flow", () => {
       now: () => now
     };
 
-    const propose = await runTool(listLeadsTool, { page: 1, per_page: 25 }, ctx);
+    const propose = await runTool(listContactsTool, { page: 1, per_page: 25 }, ctx);
     expect(ctx.usageTracker.getSnapshot(now).calls_used_today).toBe(0);
 
-    const approve = await runTool(listLeadsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -132,7 +133,7 @@ describe("approval flow", () => {
     const { freshsales, get } = mockFreshsales();
     const ctx = makeContext({ freshsales });
 
-    const result = await runTool(listLeadsTool, { page: 1, per_page: 51 }, ctx);
+    const result = await runTool(listContactsTool, { page: 1, per_page: 51 }, ctx);
 
     expect(result.isError).toBe(true);
     expect(get).not.toHaveBeenCalled();
@@ -145,9 +146,9 @@ describe("approval flow", () => {
     const ctx = makeContext({ appConfig, freshsales, now });
     ctx.now = () => now;
 
-    const propose = await runTool(listLeadsTool, { page: 1, per_page: 25 }, ctx);
+    const propose = await runTool(listContactsTool, { page: 1, per_page: 25 }, ctx);
     now = new Date("2026-08-07T10:01:01.000Z");
-    const approve = await runTool(listLeadsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(true);
     expect(approve.payload).toMatchObject({ error: { code: "REQUEST_ID_EXPIRED" } });
@@ -182,7 +183,7 @@ describe("daily usage and Freshsales client", () => {
     const appConfig = config({ dailyCallLimit: 1 });
     const now = new Date("2026-08-07T10:00:00.000Z");
     const usageTracker = new DailyUsageTracker(appConfig, now);
-    const fetchImpl = vi.fn(async () => Response.json({ leads: [] }));
+    const fetchImpl = vi.fn(async () => Response.json({ contacts: [] }));
     const freshsales = new FreshsalesClient({ config: appConfig, usageTracker, logger, fetchImpl, now: () => now });
     const ctx: ToolExecutionContext = {
       config: appConfig,
@@ -193,10 +194,10 @@ describe("daily usage and Freshsales client", () => {
       now: () => now
     };
 
-    const firstPropose = await runTool(listLeadsTool, { page: 1, per_page: 25 }, ctx);
-    await runTool(listLeadsTool, { approved: true, request_id: requestIdFrom(firstPropose) }, ctx);
-    const secondPropose = await runTool(listLeadsTool, { page: 1, per_page: 25 }, ctx);
-    const secondApprove = await runTool(listLeadsTool, { approved: true, request_id: requestIdFrom(secondPropose) }, ctx);
+    const firstPropose = await runTool(listContactsTool, { page: 1, per_page: 25 }, ctx);
+    await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(firstPropose) }, ctx);
+    const secondPropose = await runTool(listContactsTool, { page: 1, per_page: 25 }, ctx);
+    const secondApprove = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(secondPropose) }, ctx);
 
     expect(secondApprove.isError).toBe(true);
     expect(secondApprove.payload).toMatchObject({ error: { code: "DAILY_LIMIT_REACHED" } });
@@ -350,6 +351,106 @@ describe("error utilities", () => {
   });
 });
 
+describe("contact tools", () => {
+  it("fetches one contact with owner and custom fields after approval", async () => {
+    const get = vi.fn(async <T>() => ({
+      contact: {
+        id: 10,
+        first_name: "Ada",
+        last_name: "Lovelace",
+        email: "ada@example.com",
+        owner: { first_name: "Grace", last_name: "Hopper" },
+        job_title: "Founder",
+        company_name: "Analytical Engines",
+        mobile_number: "+15550101",
+        work_number: "+15550102",
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-02T00:00:00Z",
+        custom_field: { source: "Paid_meta" }
+      }
+    }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(getContactTool, { id: "10" }, ctx);
+    const approve = await runTool(getContactTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(get).toHaveBeenCalledWith("api/contacts/10", { query: { include: "owner" } });
+    expect(approve.payload).toMatchObject({
+      data: {
+        id: 10,
+        name: "Ada Lovelace",
+        email: "ada@example.com",
+        owner: "Grace Hopper",
+        job_title: "Founder",
+        company: "Analytical Engines",
+        mobile_number: "+15550101",
+        work_number: "+15550102",
+        custom_field: { source: "Paid_meta" }
+      }
+    });
+  });
+
+  it("lists contacts and filters source across defensive field variants", async () => {
+    const get = vi.fn(async <T>() => ({
+      contacts: [
+        {
+          id: 1,
+          first_name: "Ada",
+          last_name: "Lovelace",
+          email: "ada@example.com",
+          owner: { first_name: "Grace", last_name: "Hopper" },
+          custom_field: { source: "Paid_meta" }
+        },
+        {
+          id: 2,
+          first_name: "Katherine",
+          last_name: "Johnson",
+          email: "katherine@example.com",
+          owner_id: "42",
+          lead_source: "paid_META"
+        },
+        {
+          id: 3,
+          first_name: "Mary",
+          last_name: "Jackson",
+          email: "mary@example.com",
+          custom_field: { cf_source: "Organic" }
+        }
+      ]
+    }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(listContactsTool, { source: "Paid_meta", page: 2, per_page: 10 }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(get).toHaveBeenCalledWith("api/contacts/view/contact-view", {
+      query: { page: 2, per_page: 10, include: "owner" }
+    });
+    expect(approve.payload).toMatchObject({
+      data: [
+        { id: 1, name: "Ada Lovelace", email: "ada@example.com", owner: "Grace Hopper" },
+        { id: 2, name: "Katherine Johnson", email: "katherine@example.com", owner: "42" }
+      ],
+      page: 2,
+      per_page: 10,
+      filters_applied: {
+        source: "Paid_meta",
+        owner: null
+      }
+    });
+  });
+});
+
 describe("search contacts parsing", () => {
   async function runApprovedSearch(payload: unknown) {
     const get = vi.fn(async <T>() => payload as T);
@@ -445,12 +546,12 @@ describe("tool rejection logging", () => {
       }
     });
 
-    const propose = await runTool(listLeadsTool, { page: 1, per_page: 25 }, ctx);
-    const approve = await runTool(listLeadsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+    const propose = await runTool(listContactsTool, { page: 1, per_page: 25 }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(true);
     expect(logger.warn).toHaveBeenCalledWith("tool_call_rejected", {
-      tool: "list_leads",
+      tool: "list_contacts",
       status: "error",
       code: "UPSTREAM_NON_JSON",
       error_status: 200,

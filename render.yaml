@@ -13,7 +13,7 @@ services:
         sync: false
       - key: FRESHSALES_DOMAIN
         sync: false
-      - key: FRESHSALES_DEFAULT_LEADS_VIEW_ID
+      - key: FRESHSALES_DEFAULT_CONTACTS_VIEW_ID
         sync: false
       - key: FRESHSALES_DEFAULT_DEALS_VIEW_ID
         sync: false

@@ -12,7 +12,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   FRESHSALES_API_KEY: z.string().min(1),
   FRESHSALES_DOMAIN: z.string().min(1),
-  FRESHSALES_DEFAULT_LEADS_VIEW_ID: z.string().min(1),
+  FRESHSALES_DEFAULT_CONTACTS_VIEW_ID: z.string().min(1),
   FRESHSALES_DEFAULT_DEALS_VIEW_ID: z.string().min(1),
   MCP_SERVER_TOKEN: z.string().min(1).optional(),
   OAUTH_CLIENT_ID: z.string().min(1).optional(),
@@ -44,7 +44,7 @@ export interface AppConfig {
   port: number;
   freshsalesApiKey: string;
   freshsalesDomain: string;
-  defaultLeadsViewId: string;
+  defaultContactsViewId: string;
   defaultDealsViewId: string;
   mcpServerToken?: string;
   oauthClientId?: string;
@@ -75,7 +75,7 @@ export function getConfig(): AppConfig {
     port: env.PORT,
     freshsalesApiKey: env.FRESHSALES_API_KEY,
     freshsalesDomain: normalizeDomain(env.FRESHSALES_DOMAIN),
-    defaultLeadsViewId: env.FRESHSALES_DEFAULT_LEADS_VIEW_ID,
+    defaultContactsViewId: env.FRESHSALES_DEFAULT_CONTACTS_VIEW_ID,
     defaultDealsViewId: env.FRESHSALES_DEFAULT_DEALS_VIEW_ID,
     mcpServerToken: env.MCP_SERVER_TOKEN,
     oauthClientId: env.OAUTH_CLIENT_ID,

@@ -17,7 +17,7 @@ const config: AppConfig = {
   port: 3000,
   freshsalesApiKey: "freshsales-secret",
   freshsalesDomain: "https://example.myfreshworks.com",
-  defaultLeadsViewId: "lead-view",
+  defaultContactsViewId: "contact-view",
   defaultDealsViewId: "deal-view",
   mcpServerToken: "mcp-secret",
   oauthClientId: "claude-client",
@@ -94,12 +94,12 @@ describe("request logging", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "tools/call",
-        params: { name: "list_leads", arguments: { secret_looking_field: "should-not-be-logged" } }
+        params: { name: "list_contacts", arguments: { secret_looking_field: "should-not-be-logged" } }
       })
     });
 
     const mcpLogCall = info.mock.calls.find(call => call[1]?.path === "/mcp");
-    expect(mcpLogCall?.[1]).toMatchObject({ mcp_method: "tools/call", tool: "list_leads", status: 200 });
+    expect(mcpLogCall?.[1]).toMatchObject({ mcp_method: "tools/call", tool: "list_contacts", status: 200 });
     expect(JSON.stringify(mcpLogCall)).not.toContain("should-not-be-logged");
   });
 });
