@@ -112,7 +112,10 @@ export function tagNamesFromRecord(record: Record<string, unknown>): string[] {
 }
 
 export function accountNameFromRecord(record: Record<string, unknown>): string | null {
+  const primaryAccount = salesAccountsFromRecord(record).find(account => account.is_primary === true) ?? salesAccountsFromRecord(record)[0];
+
   return (
+    stringValue(primaryAccount?.name) ??
     stringValue(asRecord(record.sales_account).name) ??
     stringValue(asRecord(record.account).name) ??
     stringValue(asRecord(record.company).name) ??
@@ -121,6 +124,15 @@ export function accountNameFromRecord(record: Record<string, unknown>): string |
     stringValue(record.company_name) ??
     stringValue(record.company)
   );
+}
+
+export function salesAccountsFromRecord(record: Record<string, unknown>): Array<Record<string, unknown>> {
+  return asArray(record.sales_accounts).map(account => ({
+    id: stringValue(account.id),
+    name: stringValue(account.name),
+    is_primary: typeof account.is_primary === "boolean" ? account.is_primary : null,
+    website: stringValue(account.website)
+  }));
 }
 
 export function stageNameFromDeal(record: Record<string, unknown>): string | null {

@@ -568,6 +568,80 @@ describe("contact tools", () => {
     expect(get).toHaveBeenNthCalledWith(1, "api/settings/contacts/fields");
     expect(get).toHaveBeenNthCalledWith(2, "api/contacts/filters");
   });
+
+  it("hydrates contact relations with opt-in per-contact detail calls", async () => {
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({
+        fields: [
+          { name: "id", label: "ID" },
+          { name: "display_name", label: "Name" },
+          { name: "lifecycle_stage_id", label: "Lifecycle stage" },
+          { name: "contact_status_id", label: "Status" }
+        ]
+      })
+      .mockResolvedValueOnce({
+        contacts: [{
+          id: 10,
+          display_name: "Ada Lovelace",
+          lifecycle_stage_id: null,
+          contact_status_id: null,
+          sales_accounts: null
+        }]
+      })
+      .mockResolvedValueOnce({
+        contact: {
+          id: 10,
+          display_name: "Ada Lovelace",
+          lifecycle_stage: { name: "Qualified" },
+          lifecycle_stage_id: 2001,
+          contact_status_id: 3001,
+          sales_accounts: [{ id: 99, name: "Analytical Engines", is_primary: true }]
+        }
+      });
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(listContactsTool, { hydrate_relations: true, page: 1, per_page: 1 }, ctx);
+    expect(propose.payload).toMatchObject({ estimated_call_count: 3 });
+
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(get).toHaveBeenNthCalledWith(3, "api/contacts/10", {
+      query: { include: "owner,sales_accounts,sales_account" }
+    });
+    expect(approve.payload).toMatchObject({
+      data: [{
+        id: 10,
+        status: "Qualified",
+        lifecycle_stage_id: 2001,
+        contact_status_id: 3001,
+        account: "Analytical Engines",
+        sales_accounts: [{ id: "99", name: "Analytical Engines", is_primary: true }]
+      }],
+      filters_applied: {
+        hydrate_relations: true
+      }
+    });
+  });
+
+  it("rejects relation hydration above the per-page cap", async () => {
+    const ctx = makeContext();
+
+    const propose = await runTool(listContactsTool, { hydrate_relations: true, page: 1, per_page: 11 }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(true);
+    expect(approve.payload).toMatchObject({
+      error: {
+        code: "HYDRATION_LIMIT_EXCEEDED"
+      }
+    });
+  });
 });
 
 describe("deal tools", () => {

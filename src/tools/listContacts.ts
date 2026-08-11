@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, nameFromRecord, ownerNameFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
+import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { AppError } from "../utils/errors.js";
 import type { ToolExecutionContext } from "./common.js";
@@ -17,6 +17,7 @@ const schema = z
     filter_value: z.string().trim().min(1).max(200).optional(),
     sort_by: z.string().trim().min(1).max(100).optional(),
     sort_order: sortOrderSchema.default("asc"),
+    hydrate_relations: z.boolean().default(false),
     owner: z.string().trim().min(1).max(100).optional(),
     page: z.number().int().min(1).max(100).default(1),
     per_page: z.number().int().min(1).max(50).default(25)
@@ -30,6 +31,7 @@ interface ListContactsParams {
   filterValue?: string;
   sortBy?: string;
   sortOrder: "asc" | "desc";
+  hydrateRelations: boolean;
   owner?: string;
   page: number;
   perPage: number;
@@ -53,15 +55,20 @@ export const listContactsTool = defineTool({
       filterValue: input.filter_value,
       sortBy: input.sort_by,
       sortOrder: input.sort_order,
+      hydrateRelations: input.hydrate_relations,
       owner: input.owner,
       page: input.page,
       perPage: input.per_page
     };
   },
   estimateCallCount(params, ctx) {
-    return (params.view ? 2 : 1) + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0);
+    return (params.view ? 2 : 1) + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0) + (params.hydrateRelations ? params.perPage : 0);
   },
   async execute(params, ctx) {
+    if (params.hydrateRelations && params.perPage > 10) {
+      throw new AppError("HYDRATION_LIMIT_EXCEEDED", "hydrate_relations is capped at per_page <= 10 to protect the Freshsales daily call budget.");
+    }
+
     const fieldSchema = await fetchFieldSchema(ctx, "contacts");
     const filterField = params.filterBy ? validateFieldName(fieldSchema, params.filterBy) : undefined;
     const sortField = params.sortBy ? validateFieldName(fieldSchema, params.sortBy) : undefined;
@@ -81,7 +88,12 @@ export const listContactsTool = defineTool({
       }
     });
 
-    const contacts = getCollection(payload, "contacts")
+    const rawContacts = getCollection(payload, "contacts");
+    const hydratedContacts = params.hydrateRelations
+      ? await hydrateContactRelations(rawContacts, ctx)
+      : rawContacts;
+
+    const contacts = hydratedContacts
       .filter(contact => matchesSource(contact, params.source))
       .filter(contact => matchesDynamicFilter(contact, filterField, params.filterValue))
       .filter(contact => matchesOwner(contact, params.owner))
@@ -92,6 +104,7 @@ export const listContactsTool = defineTool({
         tags: tagNamesFromRecord(contact),
         owner: ownerNameFromRecord(contact),
         account: accountNameFromRecord(contact),
+        sales_accounts: salesAccountsFromRecord(contact),
         name: nameFromRecord(contact),
         email: emailFromRecord(contact)
       }));
@@ -108,6 +121,7 @@ export const listContactsTool = defineTool({
         sort_by: params.sortBy ?? null,
         sort_order: params.sortBy ? params.sortOrder : null,
         sort_scope: params.sortBy ? (nativeSort ? "freshsales" : "page") : null,
+        hydrate_relations: params.hydrateRelations,
         owner: params.owner ?? null
       }
     };
@@ -130,6 +144,34 @@ async function resolveContactViewId(ctx: ToolExecutionContext, view: string): Pr
   }
 
   return String(matched.id);
+}
+
+async function hydrateContactRelations(
+  contacts: Array<Record<string, unknown>>,
+  ctx: ToolExecutionContext
+): Promise<Array<Record<string, unknown>>> {
+  return Promise.all(contacts.map(async contact => {
+    const id = contact.id;
+    if (id === undefined || id === null) {
+      return contact;
+    }
+
+    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/contacts/${id}`, {
+      query: {
+        include: "owner,sales_accounts,sales_account"
+      }
+    });
+    const detail = getPrimaryRecord(payload, "contact");
+
+    return {
+      ...contact,
+      ...detail,
+      custom_field: {
+        ...asRecord(contact.custom_field),
+        ...asRecord(detail.custom_field)
+      }
+    };
+  }));
 }
 
 function matchesSource(record: Record<string, unknown>, source?: string): boolean {
