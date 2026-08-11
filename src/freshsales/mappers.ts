@@ -78,8 +78,48 @@ export function emailFromRecord(record: Record<string, unknown>): string | null 
 export function ownerNameFromRecord(record: Record<string, unknown>): string | null {
   return (
     nameFromRecord(asRecord(record.owner)) ??
+    nameFromRecord(asRecord(record.sales_owner)) ??
     stringValue(record.owner_name) ??
+    stringValue(record.sales_owner_name) ??
     stringValue(record.owner_id)
+  );
+}
+
+export function contactStatusFromRecord(record: Record<string, unknown>): string | null {
+  return (
+    stringValue(asRecord(record.lifecycle_stage).name) ??
+    stringValue(asRecord(record.contact_status).name) ??
+    stringValue(asRecord(record.status).name) ??
+    stringValue(record.lifecycle_stage_name) ??
+    stringValue(record.contact_status_name) ??
+    stringValue(record.status_name) ??
+    stringValue(record.stage_name) ??
+    stringValue(record.status) ??
+    stringValue(record.stage) ??
+    stringValue(record.lifecycle_stage_id)
+  );
+}
+
+export function tagNamesFromRecord(record: Record<string, unknown>): string[] {
+  const tags = record.tags;
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+
+  return tags
+    .map(tag => typeof tag === "string" ? tag : nameFromRecord(asRecord(tag)))
+    .filter((tag): tag is string => Boolean(tag));
+}
+
+export function accountNameFromRecord(record: Record<string, unknown>): string | null {
+  return (
+    stringValue(asRecord(record.sales_account).name) ??
+    stringValue(asRecord(record.account).name) ??
+    stringValue(asRecord(record.company).name) ??
+    stringValue(record.sales_account_name) ??
+    stringValue(record.account_name) ??
+    stringValue(record.company_name) ??
+    stringValue(record.company)
   );
 }
 
@@ -122,6 +162,17 @@ export function amountFromDeal(record: Record<string, unknown>): number {
   return 0;
 }
 
+export function weightedValueFromDeal(record: Record<string, unknown>): number | null {
+  const direct = numberValue(record.weighted_value) ?? numberValue(record.weighted_amount);
+  if (direct !== null) {
+    return direct;
+  }
+
+  const amount = amountFromDeal(record);
+  const probability = numberValue(record.probability);
+  return probability !== null ? amount * (probability / 100) : null;
+}
+
 export function linkedContactFromDeal(record: Record<string, unknown>): { id: string | null; name: string | null } | null {
   const contacts = asArray(record.contacts);
   const first = contacts[0];
@@ -150,6 +201,19 @@ export function linkedAccountFromDeal(record: Record<string, unknown>): { id: st
       id: stringValue(account.id),
       name: stringValue(account.name)
     };
+  }
+
+  return null;
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   return null;

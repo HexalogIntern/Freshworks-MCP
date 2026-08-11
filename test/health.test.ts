@@ -31,6 +31,7 @@ const config: AppConfig = {
   maxRetryWaitMs: 2000,
   localRateLimitPerMinute: 60,
   pipelineSummaryMaxPages: 5,
+  fieldSchemaCacheTtlMs: 3600000,
   freshsalesRequestTimeoutMs: 10000,
   mcpRequestTimeoutMs: 25000
 };

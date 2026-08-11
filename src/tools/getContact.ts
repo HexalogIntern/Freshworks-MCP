@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { emailFromRecord, getPrimaryRecord, nameFromRecord, ownerNameFromRecord } from "../freshsales/mappers.js";
+import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
 import { approvalFields, defineTool } from "./common.js";
 
 const schema = z
@@ -33,7 +33,7 @@ export const getContactTool = defineTool({
   async execute(params, ctx) {
     const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/contacts/${params.id}`, {
       query: {
-        include: "owner"
+        include: "owner,sales_account"
       }
     });
 
@@ -44,9 +44,12 @@ export const getContactTool = defineTool({
         id: contact.id ?? null,
         name: nameFromRecord(contact),
         email: emailFromRecord(contact),
+        status: contactStatusFromRecord(contact),
+        tags: tagNamesFromRecord(contact),
         owner: ownerNameFromRecord(contact),
         job_title: contact.job_title ?? null,
-        company: contact.company_name ?? contact.account_name ?? contact.sales_account_name ?? null,
+        account: accountNameFromRecord(contact),
+        company: accountNameFromRecord(contact),
         mobile_number: contact.mobile_number ?? null,
         work_number: contact.work_number ?? null,
         created_at: contact.created_at ?? null,

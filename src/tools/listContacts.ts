@@ -1,15 +1,22 @@
 import { z } from "zod";
 
-import { emailFromRecord, getCollection, nameFromRecord, ownerNameFromRecord } from "../freshsales/mappers.js";
+import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, nameFromRecord, ownerNameFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
+import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { AppError } from "../utils/errors.js";
 import type { ToolExecutionContext } from "./common.js";
 import { approvalFields, defineTool } from "./common.js";
+
+const sortOrderSchema = z.enum(["asc", "desc"]);
 
 const schema = z
   .object({
     ...approvalFields,
     view: z.string().trim().min(1).max(100).optional(),
     source: z.string().trim().min(1).max(100).optional(),
+    filter_by: z.string().trim().min(1).max(100).optional(),
+    filter_value: z.string().trim().min(1).max(200).optional(),
+    sort_by: z.string().trim().min(1).max(100).optional(),
+    sort_order: sortOrderSchema.default("asc"),
     owner: z.string().trim().min(1).max(100).optional(),
     page: z.number().int().min(1).max(100).default(1),
     per_page: z.number().int().min(1).max(50).default(25)
@@ -19,6 +26,10 @@ const schema = z
 interface ListContactsParams {
   view?: string;
   source?: string;
+  filterBy?: string;
+  filterValue?: string;
+  sortBy?: string;
+  sortOrder: "asc" | "desc";
   owner?: string;
   page: number;
   perPage: number;
@@ -32,48 +43,57 @@ export const listContactsTool = defineTool({
   name: "list_contacts",
   title: "List Contacts",
   description:
-    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Optional source and owner filters are applied after fetching the view page.",
+    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Field output, filter_by, and sort_by are validated against Freshsales contact field metadata.",
   inputSchema: schema,
   resolve(input): ListContactsParams {
     return {
       view: input.view,
       source: input.source,
+      filterBy: input.filter_by,
+      filterValue: input.filter_value,
+      sortBy: input.sort_by,
+      sortOrder: input.sort_order,
       owner: input.owner,
       page: input.page,
       perPage: input.per_page
     };
   },
-  estimateCallCount(params) {
-    return params.view ? 2 : 1;
+  estimateCallCount(params, ctx) {
+    return (params.view ? 2 : 1) + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0);
   },
   async execute(params, ctx) {
+    const fieldSchema = await fetchFieldSchema(ctx, "contacts");
+    const filterField = params.filterBy ? validateFieldName(fieldSchema, params.filterBy) : undefined;
+    const sortField = params.sortBy ? validateFieldName(fieldSchema, params.sortBy) : undefined;
     const viewId = params.view
       ? await resolveContactViewId(ctx, params.view)
       : ctx.config.defaultContactsViewId;
+
+    const nativeSort = sortField && nativeContactSortFields.has(sortField.name);
 
     const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/contacts/view/${viewId}`, {
       query: {
         page: params.page,
         per_page: params.perPage,
-        include: "owner"
+        include: "owner,sales_account",
+        sort: nativeSort ? sortField.name : undefined,
+        sort_type: nativeSort ? params.sortOrder : undefined
       }
     });
 
     const contacts = getCollection(payload, "contacts")
       .filter(contact => matchesSource(contact, params.source))
+      .filter(contact => matchesDynamicFilter(contact, filterField, params.filterValue))
       .filter(contact => matchesOwner(contact, params.owner))
+      .sort((left, right) => sortField && !nativeSort ? compareFieldValues(left, right, sortField, params.sortOrder) : 0)
       .map(contact => ({
-        id: contact.id ?? null,
-        name: nameFromRecord(contact),
-        email: emailFromRecord(contact),
+        ...dynamicRecordFromSchema(contact, fieldSchema),
+        status: contactStatusFromRecord(contact),
+        tags: tagNamesFromRecord(contact),
         owner: ownerNameFromRecord(contact),
-        job_title: contact.job_title ?? null,
-        company: contact.company_name ?? contact.account_name ?? contact.sales_account_name ?? null,
-        mobile_number: contact.mobile_number ?? null,
-        work_number: contact.work_number ?? null,
-        created_at: contact.created_at ?? null,
-        updated_at: contact.updated_at ?? null,
-        custom_field: contact.custom_field ?? null
+        account: accountNameFromRecord(contact),
+        name: nameFromRecord(contact),
+        email: emailFromRecord(contact)
       }));
 
     return {
@@ -83,12 +103,19 @@ export const listContactsTool = defineTool({
       filters_applied: {
         view: params.view ?? null,
         source: params.source ?? null,
+        filter_by: params.filterBy ?? null,
+        filter_value: params.filterValue ?? null,
+        sort_by: params.sortBy ?? null,
+        sort_order: params.sortBy ? params.sortOrder : null,
+        sort_scope: params.sortBy ? (nativeSort ? "freshsales" : "page") : null,
         owner: params.owner ?? null
       }
     };
   },
   willCallFreshsales: true
 });
+
+const nativeContactSortFields = new Set(["lead_score", "created_at", "updated_at", "open_deals_amount", "last_contacted"]);
 
 async function resolveContactViewId(ctx: ToolExecutionContext, view: string): Promise<string> {
   const payload = await ctx.freshsales.get<FilterPayload>("api/contacts/filters");
@@ -121,6 +148,39 @@ function matchesSource(record: Record<string, unknown>, source?: string): boolea
   ];
 
   return candidates.some(candidate => String(candidate ?? "").toLowerCase() === source.toLowerCase());
+}
+
+function matchesDynamicFilter(record: Record<string, unknown>, field: FreshsalesFieldDefinition | undefined, filterValue: string | undefined): boolean {
+  if (!field) {
+    return true;
+  }
+
+  if (!filterValue) {
+    throw new AppError("MISSING_FILTER_VALUE", "filter_value is required when filter_by is provided.");
+  }
+
+  return String(fieldValueFor(record, field) ?? "").toLowerCase() === filterValue.toLowerCase();
+}
+
+function compareFieldValues(left: Record<string, unknown>, right: Record<string, unknown>, field: FreshsalesFieldDefinition, order: "asc" | "desc"): number {
+  const direction = order === "asc" ? 1 : -1;
+  return compareValues(fieldValueFor(left, field), fieldValueFor(right, field)) * direction;
+}
+
+function compareValues(left: unknown, right: unknown): number {
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+    return leftNumber - rightNumber;
+  }
+
+  const leftDate = Date.parse(String(left ?? ""));
+  const rightDate = Date.parse(String(right ?? ""));
+  if (!Number.isNaN(leftDate) && !Number.isNaN(rightDate)) {
+    return leftDate - rightDate;
+  }
+
+  return String(left ?? "").localeCompare(String(right ?? ""));
 }
 
 function matchesOwner(record: Record<string, unknown>, owner?: string): boolean {

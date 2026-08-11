@@ -26,6 +26,7 @@ const envSchema = z.object({
   FRESHSALES_MAX_RETRY_WAIT_MS: z.coerce.number().int().min(100).max(5000).default(2000),
   LOCAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(60),
   PIPELINE_SUMMARY_MAX_PAGES: z.coerce.number().int().min(1).max(10).default(5),
+  FIELD_SCHEMA_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600000),
   FRESHSALES_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
   MCP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(25000)
 });
@@ -58,6 +59,7 @@ export interface AppConfig {
   maxRetryWaitMs: number;
   localRateLimitPerMinute: number;
   pipelineSummaryMaxPages: number;
+  fieldSchemaCacheTtlMs: number;
   freshsalesRequestTimeoutMs: number;
   mcpRequestTimeoutMs: number;
 }
@@ -89,6 +91,7 @@ export function getConfig(): AppConfig {
     maxRetryWaitMs: env.FRESHSALES_MAX_RETRY_WAIT_MS,
     localRateLimitPerMinute: env.LOCAL_RATE_LIMIT_PER_MINUTE,
     pipelineSummaryMaxPages: env.PIPELINE_SUMMARY_MAX_PAGES,
+    fieldSchemaCacheTtlMs: env.FIELD_SCHEMA_CACHE_TTL_MS,
     freshsalesRequestTimeoutMs: env.FRESHSALES_REQUEST_TIMEOUT_MS,
     mcpRequestTimeoutMs: env.MCP_REQUEST_TIMEOUT_MS
   };

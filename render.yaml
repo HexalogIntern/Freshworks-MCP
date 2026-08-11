@@ -39,3 +39,5 @@ services:
         value: "60"
       - key: PIPELINE_SUMMARY_MAX_PAGES
         value: "5"
+      - key: FIELD_SCHEMA_CACHE_TTL_MS
+        value: "3600000"

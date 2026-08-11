@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
+import { clearFieldSchemaCache } from "../src/freshsales/fieldSchema.js";
 import { FreshsalesClient } from "../src/freshsales/client.js";
 import { ApprovalStore } from "../src/state/approvalStore.js";
 import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
@@ -21,6 +22,7 @@ const logger: Logger = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearFieldSchemaCache();
 });
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -41,6 +43,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     maxRetryWaitMs: 2000,
     localRateLimitPerMinute: 60,
     pipelineSummaryMaxPages: 5,
+    fieldSchemaCacheTtlMs: 3600000,
     freshsalesRequestTimeoutMs: 10000,
     mcpRequestTimeoutMs: 25000,
     ...overrides
@@ -67,7 +70,17 @@ function makeContext(options: {
 }
 
 function mockFreshsales() {
-  const get = vi.fn(async <T>() => ({ contacts: [] }) as T);
+  const get = vi.fn(async <T>(path: string) => {
+    if (path === "api/settings/contacts/fields") {
+      return { fields: [{ name: "id", label: "ID" }, { name: "display_name", label: "Name" }] } as T;
+    }
+
+    if (path === "api/settings/deals/fields") {
+      return { fields: [{ name: "id", label: "ID" }, { name: "name", label: "Name" }] } as T;
+    }
+
+    return { contacts: [] } as T;
+  });
   const freshsales: FreshsalesClientLike = {
     get: get as unknown as FreshsalesClientLike["get"]
   };
@@ -99,7 +112,7 @@ describe("approval flow", () => {
       status: "pending_approval",
       tool: "list_contacts",
       will_call_freshsales: true,
-      estimated_call_count: 1
+      estimated_call_count: 2
     });
     expect(get).not.toHaveBeenCalled();
     expect(ctx.usageTracker.getSnapshot(ctx.now()).calls_used_today).toBe(0);
@@ -109,7 +122,11 @@ describe("approval flow", () => {
     const appConfig = config();
     const now = new Date("2026-08-07T10:00:00.000Z");
     const usageTracker = new DailyUsageTracker(appConfig, now);
-    const fetchImpl = vi.fn(async () => Response.json({ contacts: [{ id: 1, first_name: "Ada", last_name: "Lovelace" }] }));
+    const fetchImpl = vi.fn(async (url: URL) => {
+      return url.toString().includes("api/settings/contacts/fields")
+        ? Response.json({ fields: [{ name: "id", label: "ID" }, { name: "display_name", label: "Name" }] })
+        : Response.json({ contacts: [{ id: 1, first_name: "Ada", last_name: "Lovelace" }] });
+    });
     const freshsales = new FreshsalesClient({ config: appConfig, usageTracker, logger, fetchImpl, now: () => now });
     const ctx: ToolExecutionContext = {
       config: appConfig,
@@ -126,8 +143,8 @@ describe("approval flow", () => {
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(ctx.usageTracker.getSnapshot(now).calls_used_today).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(ctx.usageTracker.getSnapshot(now).calls_used_today).toBe(2);
   });
 
   it("rejects invalid parameters before any network call", async () => {
@@ -181,10 +198,14 @@ describe("daily usage and Freshsales client", () => {
   });
 
   it("checks daily capacity before an approved Freshsales call", async () => {
-    const appConfig = config({ dailyCallLimit: 1 });
+    const appConfig = config({ dailyCallLimit: 2 });
     const now = new Date("2026-08-07T10:00:00.000Z");
     const usageTracker = new DailyUsageTracker(appConfig, now);
-    const fetchImpl = vi.fn(async () => Response.json({ contacts: [] }));
+    const fetchImpl = vi.fn(async (url: URL) => {
+      return url.toString().includes("api/settings/contacts/fields")
+        ? Response.json({ fields: [{ name: "id", label: "ID" }, { name: "display_name", label: "Name" }] })
+        : Response.json({ contacts: [] });
+    });
     const freshsales = new FreshsalesClient({ config: appConfig, usageTracker, logger, fetchImpl, now: () => now });
     const ctx: ToolExecutionContext = {
       config: appConfig,
@@ -202,7 +223,7 @@ describe("daily usage and Freshsales client", () => {
 
     expect(secondApprove.isError).toBe(true);
     expect(secondApprove.payload).toMatchObject({ error: { code: "DAILY_LIMIT_REACHED" } });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("backs off once on Freshsales 429 responses", async () => {
@@ -361,8 +382,10 @@ describe("contact tools", () => {
         last_name: "Lovelace",
         email: "ada@example.com",
         owner: { first_name: "Grace", last_name: "Hopper" },
+        status_name: "Qualified",
+        tags: [{ name: "Decision maker" }],
         job_title: "Founder",
-        company_name: "Analytical Engines",
+        sales_account: { id: 99, name: "Analytical Engines" },
         mobile_number: "+15550101",
         work_number: "+15550102",
         created_at: "2026-08-01T00:00:00Z",
@@ -380,14 +403,17 @@ describe("contact tools", () => {
     const approve = await runTool(getContactTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
-    expect(get).toHaveBeenCalledWith("api/contacts/10", { query: { include: "owner" } });
+    expect(get).toHaveBeenCalledWith("api/contacts/10", { query: { include: "owner,sales_account" } });
     expect(approve.payload).toMatchObject({
       data: {
         id: 10,
         name: "Ada Lovelace",
         email: "ada@example.com",
+        status: "Qualified",
+        tags: ["Decision maker"],
         owner: "Grace Hopper",
         job_title: "Founder",
+        account: "Analytical Engines",
         company: "Analytical Engines",
         mobile_number: "+15550101",
         work_number: "+15550102",
@@ -397,33 +423,52 @@ describe("contact tools", () => {
   });
 
   it("lists contacts and filters source across defensive field variants", async () => {
-    const get = vi.fn(async <T>() => ({
-      contacts: [
-        {
-          id: 1,
-          first_name: "Ada",
-          last_name: "Lovelace",
-          email: "ada@example.com",
-          owner: { first_name: "Grace", last_name: "Hopper" },
-          custom_field: { source: "Paid_meta" }
-        },
-        {
-          id: 2,
-          first_name: "Katherine",
-          last_name: "Johnson",
-          email: "katherine@example.com",
-          owner_id: "42",
-          lead_source: "paid_META"
-        },
-        {
-          id: 3,
-          first_name: "Mary",
-          last_name: "Jackson",
-          email: "mary@example.com",
-          custom_field: { cf_source: "Organic" }
-        }
-      ]
-    }) as T);
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "display_name", label: "Name" },
+            { name: "email", label: "Email" },
+            { name: "cf_paid_meta", label: "Paid meta" }
+          ]
+        } as T;
+      }
+
+      return {
+        contacts: [
+          {
+            id: 1,
+            first_name: "Ada",
+            last_name: "Lovelace",
+            email: "ada@example.com",
+            owner: { first_name: "Grace", last_name: "Hopper" },
+            status: "Won",
+            tags: [{ name: "Decision maker" }, { name: "Champion" }],
+            sales_account: { id: 99, name: "Analytical Engines" },
+            custom_field: { source: "Paid_meta", cf_paid_meta: "yes" }
+          },
+          {
+            id: 2,
+            first_name: "Katherine",
+            last_name: "Johnson",
+            email: "katherine@example.com",
+            owner_id: "42",
+            lifecycle_stage: { name: "Qualified" },
+            tags: ["Influencer"],
+            sales_account_name: "NASA",
+            lead_source: "paid_META"
+          },
+          {
+            id: 3,
+            first_name: "Mary",
+            last_name: "Jackson",
+            email: "mary@example.com",
+            custom_field: { cf_source: "Organic" }
+          }
+        ]
+      } as T;
+    });
     const ctx = makeContext({
       freshsales: {
         get: get as unknown as FreshsalesClientLike["get"]
@@ -435,12 +480,29 @@ describe("contact tools", () => {
 
     expect(approve.isError).toBe(false);
     expect(get).toHaveBeenCalledWith("api/contacts/view/contact-view", {
-      query: { page: 2, per_page: 10, include: "owner" }
+      query: { page: 2, per_page: 10, include: "owner,sales_account", sort: undefined, sort_type: undefined }
     });
     expect(approve.payload).toMatchObject({
       data: [
-        { id: 1, name: "Ada Lovelace", email: "ada@example.com", owner: "Grace Hopper" },
-        { id: 2, name: "Katherine Johnson", email: "katherine@example.com", owner: "42" }
+        {
+          id: 1,
+          cf_paid_meta: "yes",
+          name: "Ada Lovelace",
+          email: "ada@example.com",
+          status: "Won",
+          tags: ["Decision maker", "Champion"],
+          owner: "Grace Hopper",
+          account: "Analytical Engines"
+        },
+        {
+          id: 2,
+          name: "Katherine Johnson",
+          email: "katherine@example.com",
+          status: "Qualified",
+          tags: ["Influencer"],
+          owner: "42",
+          account: "NASA"
+        }
       ],
       page: 2,
       per_page: 10,
@@ -454,6 +516,7 @@ describe("contact tools", () => {
   it("resolves a contact view by name before listing contacts", async () => {
     const get = vi
       .fn()
+      .mockResolvedValueOnce({ fields: [{ name: "id", label: "ID" }, { name: "display_name", label: "Name" }] })
       .mockResolvedValueOnce({ filters: [{ id: "paid-meta-view", name: "Paid_meta" }] })
       .mockResolvedValueOnce({ contacts: [{ id: 1, first_name: "Ada", last_name: "Lovelace" }] });
     const ctx = makeContext({
@@ -463,14 +526,15 @@ describe("contact tools", () => {
     });
 
     const propose = await runTool(listContactsTool, { view: "Paid_meta", page: 1, per_page: 25 }, ctx);
-    expect(propose.payload).toMatchObject({ estimated_call_count: 2 });
+    expect(propose.payload).toMatchObject({ estimated_call_count: 3 });
 
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
-    expect(get).toHaveBeenNthCalledWith(1, "api/contacts/filters");
-    expect(get).toHaveBeenNthCalledWith(2, "api/contacts/view/paid-meta-view", {
-      query: { page: 1, per_page: 25, include: "owner" }
+    expect(get).toHaveBeenNthCalledWith(1, "api/settings/contacts/fields");
+    expect(get).toHaveBeenNthCalledWith(2, "api/contacts/filters");
+    expect(get).toHaveBeenNthCalledWith(3, "api/contacts/view/paid-meta-view", {
+      query: { page: 1, per_page: 25, include: "owner,sales_account", sort: undefined, sort_type: undefined }
     });
     expect(approve.payload).toMatchObject({
       filters_applied: {
@@ -480,7 +544,10 @@ describe("contact tools", () => {
   });
 
   it("returns INVALID_FILTER when a contact view name cannot be resolved", async () => {
-    const get = vi.fn(async <T>() => ({ filters: [{ id: "all", name: "All Contacts" }] }) as T);
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ fields: [{ name: "id", label: "ID" }] })
+      .mockResolvedValueOnce({ filters: [{ id: "all", name: "All Contacts" }] });
     const ctx = makeContext({
       freshsales: {
         get: get as unknown as FreshsalesClientLike["get"]
@@ -497,8 +564,9 @@ describe("contact tools", () => {
         message: "Unknown Freshsales contact filter: Paid_meta."
       }
     });
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith("api/contacts/filters");
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenNthCalledWith(1, "api/settings/contacts/fields");
+    expect(get).toHaveBeenNthCalledWith(2, "api/contacts/filters");
   });
 });
 
@@ -506,8 +574,18 @@ describe("deal tools", () => {
   it("resolves a deal view by name before listing deals", async () => {
     const get = vi
       .fn()
+      .mockResolvedValueOnce({ fields: [{ name: "id", label: "ID" }, { name: "name", label: "Name" }, { name: "amount", label: "Amount" }, { name: "close_date", label: "Close Date" }] })
       .mockResolvedValueOnce({ filters: [{ id: "paid-meta-deals", name: "Paid_meta" }] })
-      .mockResolvedValueOnce({ deals: [{ id: 5, name: "Expansion", amount: "1200", deal_stage: { name: "Won" } }] });
+      .mockResolvedValueOnce({
+        deals: [{
+          id: 5,
+          name: "Expansion",
+          amount: "1200",
+          weighted_value: "900",
+          deal_stage: { name: "Won" },
+          close_date: "2026-09-01"
+        }]
+      });
     const ctx = makeContext({
       freshsales: {
         get: get as unknown as FreshsalesClientLike["get"]
@@ -515,17 +593,18 @@ describe("deal tools", () => {
     });
 
     const propose = await runTool(listDealsTool, { view: "Paid_meta", page: 1, per_page: 25 }, ctx);
-    expect(propose.payload).toMatchObject({ estimated_call_count: 2 });
+    expect(propose.payload).toMatchObject({ estimated_call_count: 3 });
 
     const approve = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
-    expect(get).toHaveBeenNthCalledWith(1, "api/deals/filters");
-    expect(get).toHaveBeenNthCalledWith(2, "api/deals/view/paid-meta-deals", {
-      query: { page: 1, per_page: 25, include: "owner,sales_account,contacts,deal_stage" }
+    expect(get).toHaveBeenNthCalledWith(1, "api/settings/deals/fields");
+    expect(get).toHaveBeenNthCalledWith(2, "api/deals/filters");
+    expect(get).toHaveBeenNthCalledWith(3, "api/deals/view/paid-meta-deals", {
+      query: { page: 1, per_page: 25, include: "owner,sales_account,contacts,deal_stage", sort: undefined, sort_type: undefined }
     });
     expect(approve.payload).toMatchObject({
-      data: [{ id: 5, name: "Expansion", amount: 1200, stage: "Won" }],
+      data: [{ id: 5, name: "Expansion", amount: 1200, weighted_value: 900, stage: "Won", close_date: "2026-09-01" }],
       filters_applied: {
         view: "Paid_meta"
       }
@@ -533,7 +612,10 @@ describe("deal tools", () => {
   });
 
   it("returns INVALID_FILTER when a deal view name cannot be resolved", async () => {
-    const get = vi.fn(async <T>() => ({ filters: [{ id: "all", name: "All Deals" }] }) as T);
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ fields: [{ name: "id", label: "ID" }] })
+      .mockResolvedValueOnce({ filters: [{ id: "all", name: "All Deals" }] });
     const ctx = makeContext({
       freshsales: {
         get: get as unknown as FreshsalesClientLike["get"]
@@ -550,8 +632,9 @@ describe("deal tools", () => {
         message: "Unknown Freshsales deal filter: Paid_meta."
       }
     });
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith("api/deals/filters");
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenNthCalledWith(1, "api/settings/deals/fields");
+    expect(get).toHaveBeenNthCalledWith(2, "api/deals/filters");
   });
 });
 
