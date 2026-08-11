@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-import { amountFromDeal, getCollection, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal } from "../freshsales/mappers.js";
+import { amountFromDeal, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal } from "../freshsales/mappers.js";
+import { scanView } from "../freshsales/paginatedScan.js";
 import { normalizeMonth } from "../utils/time.js";
 import { approvalFields, defineTool } from "./common.js";
 
@@ -38,56 +39,39 @@ export const pipelineSummaryTool = defineTool({
   async execute(params, ctx) {
     const perPage = 50;
     const groups = new Map<string, { count: number; total_amount: number; lifecycle_breakdown: Record<string, number> }>();
-    let scannedRecords = 0;
-    let truncated = false;
 
-    for (let page = 1; page <= ctx.config.pipelineSummaryMaxPages; page += 1) {
-      const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/deals/view/${ctx.config.defaultDealsViewId}`, {
-        query: {
-          page,
-          per_page: perPage,
-          include: "owner,deal_stage"
+    const scan = await scanView(ctx, {
+      entity: "deals",
+      viewId: ctx.config.defaultDealsViewId,
+      perPage,
+      maxPages: ctx.config.pipelineSummaryMaxPages,
+      include: "owner,deal_stage",
+      matches: () => true
+    });
+
+    for (const deal of scan.records) {
+      const key = groupKey(params.groupBy, deal);
+      const current = groups.get(key) ?? {
+        count: 0,
+        total_amount: 0,
+        lifecycle_breakdown: {
+          open: 0,
+          won: 0,
+          lost: 0
         }
-      });
+      };
 
-      const deals = getCollection(payload, "deals");
-      if (deals.length === 0) {
-        break;
-      }
-
-      for (const deal of deals) {
-        scannedRecords += 1;
-        const key = groupKey(params.groupBy, deal);
-        const current = groups.get(key) ?? {
-          count: 0,
-          total_amount: 0,
-          lifecycle_breakdown: {
-            open: 0,
-            won: 0,
-            lost: 0
-          }
-        };
-
-        const lifecycle = normalizedDealLifecycle(deal);
-        current.count += 1;
-        current.total_amount += amountFromDeal(deal);
-        current.lifecycle_breakdown[lifecycle] = (current.lifecycle_breakdown[lifecycle] ?? 0) + 1;
-        groups.set(key, current);
-      }
-
-      if (deals.length < perPage) {
-        break;
-      }
-
-      if (page === ctx.config.pipelineSummaryMaxPages) {
-        truncated = true;
-      }
+      const lifecycle = normalizedDealLifecycle(deal);
+      current.count += 1;
+      current.total_amount += amountFromDeal(deal);
+      current.lifecycle_breakdown[lifecycle] = (current.lifecycle_breakdown[lifecycle] ?? 0) + 1;
+      groups.set(key, current);
     }
 
     return {
       group_by: params.groupBy,
-      scanned_records: scannedRecords,
-      truncated,
+      scanned_records: scan.scannedRecords,
+      truncated: scan.truncated,
       groups: Array.from(groups.entries()).map(([key, value]) => ({
         key,
         count: value.count,

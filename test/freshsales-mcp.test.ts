@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
 import { clearFieldSchemaCache } from "../src/freshsales/fieldSchema.js";
+import { scanView } from "../src/freshsales/paginatedScan.js";
 import { FreshsalesClient } from "../src/freshsales/client.js";
 import { ApprovalStore } from "../src/state/approvalStore.js";
 import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { getContactTool } from "../src/tools/getContact.js";
+import { contactsSummaryTool } from "../src/tools/contactsSummary.js";
 import { listContactsTool } from "../src/tools/listContacts.js";
 import { listDealsTool } from "../src/tools/listDeals.js";
 import { searchContactsTool } from "../src/tools/searchContacts.js";
@@ -43,6 +45,8 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     maxRetryWaitMs: 2000,
     localRateLimitPerMinute: 60,
     pipelineSummaryMaxPages: 5,
+    contactsScanMaxPages: 10,
+    dealsScanMaxPages: 10,
     fieldSchemaCacheTtlMs: 3600000,
     freshsalesRequestTimeoutMs: 10000,
     mcpRequestTimeoutMs: 25000,
@@ -99,6 +103,53 @@ function requestIdFrom(result: Awaited<ReturnType<typeof runTool>>): string {
 
   return payload.request_id;
 }
+
+describe("paginated scan", () => {
+  it("finds matches scattered beyond page one and reports truncation accurately", async () => {
+    const get = vi.fn(async <T>(_path: string, options?: { query?: { page?: number; per_page?: number } }) => {
+      const page = Number(options?.query?.page ?? 1);
+      const perPage = Number(options?.query?.per_page ?? 5);
+      const contacts = Array.from({ length: perPage }, (_, index) => {
+        const id = (page - 1) * perPage + index + 1;
+        return { id, source: page >= 3 && page <= 6 && index === 0 ? "Paid_meta" : "Organic" };
+      });
+
+      return { contacts } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const scan = await scanView(ctx, {
+      entity: "contacts",
+      viewId: "contact-view",
+      perPage: 5,
+      maxPages: 10,
+      matches: record => record.source === "Paid_meta"
+    });
+
+    expect(scan.records.map(record => record.id)).toEqual([11, 16, 21, 26]);
+    expect(scan.scannedRecords).toBe(50);
+    expect(scan.truncated).toBe(true);
+  });
+
+  it("sets truncated false when the dataset fits within the scan cap", async () => {
+    const get = vi.fn(async <T>(_path: string, options?: { query?: { page?: number; per_page?: number } }) => {
+      const page = Number(options?.query?.page ?? 1);
+      return { contacts: page < 3 ? [{ id: page }] : [] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const scan = await scanView(ctx, {
+      entity: "contacts",
+      viewId: "contact-view",
+      perPage: 1,
+      maxPages: 10,
+      matches: () => true
+    });
+
+    expect(scan.scannedRecords).toBe(2);
+    expect(scan.truncated).toBe(false);
+  });
+});
 
 describe("approval flow", () => {
   it("returns a pending approval preview without calling Freshsales", async () => {
@@ -422,20 +473,23 @@ describe("contact tools", () => {
     });
   });
 
-  it("lists contacts and filters source across defensive field variants", async () => {
-    const get = vi.fn(async <T>(path: string) => {
+  it("lists contacts and resolves source through Freshsales field metadata", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { page?: number } }) => {
       if (path === "api/settings/contacts/fields") {
         return {
           fields: [
             { name: "id", label: "ID" },
             { name: "display_name", label: "Name" },
             { name: "email", label: "Email" },
-            { name: "cf_paid_meta", label: "Paid meta" }
+            { name: "cf_source", label: "Source" }
           ]
         } as T;
       }
 
-      return {
+      const page = Number(options?.query?.page ?? 1);
+      return page === 1 ? {
+        contacts: Array.from({ length: 10 }, (_, index) => ({ id: 90 + index, first_name: "Page", last_name: "One", custom_field: { cf_source: "Organic" } }))
+      } as T : {
         contacts: [
           {
             id: 1,
@@ -446,7 +500,7 @@ describe("contact tools", () => {
             status: "Won",
             tags: [{ name: "Decision maker" }, { name: "Champion" }],
             sales_account: { id: 99, name: "Analytical Engines" },
-            custom_field: { source: "Paid_meta", cf_paid_meta: "yes" }
+            custom_field: { cf_source: "Paid_meta" }
           },
           {
             id: 2,
@@ -457,7 +511,7 @@ describe("contact tools", () => {
             lifecycle_stage: { name: "Qualified" },
             tags: ["Influencer"],
             sales_account_name: "NASA",
-            lead_source: "paid_META"
+            custom_field: { cf_source: "paid_META" }
           },
           {
             id: 3,
@@ -479,14 +533,12 @@ describe("contact tools", () => {
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
-    expect(get).toHaveBeenCalledWith("api/contacts/view/contact-view", {
-      query: { page: 2, per_page: 10, include: "owner,sales_account", sort: undefined, sort_type: undefined }
-    });
+    expect(propose.payload).toMatchObject({ estimated_call_count: 11 });
     expect(approve.payload).toMatchObject({
       data: [
         {
           id: 1,
-          cf_paid_meta: "yes",
+          cf_source: "Paid_meta",
           name: "Ada Lovelace",
           email: "ada@example.com",
           status: "Won",
@@ -506,6 +558,8 @@ describe("contact tools", () => {
       ],
       page: 2,
       per_page: 10,
+      scanned_records: 13,
+      truncated: false,
       filters_applied: {
         source: "Paid_meta",
         owner: null
@@ -541,6 +595,62 @@ describe("contact tools", () => {
         view: "Paid_meta"
       }
     });
+  });
+
+  it("returns UNKNOWN_FIELD when source is not resolvable in contact metadata", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return { fields: [{ name: "cf_channel", label: "Source Channel" }] } as T;
+      }
+
+      return { contacts: [] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(listContactsTool, { source: "Paid_meta" }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(true);
+    expect(approve.payload).toMatchObject({
+      error: {
+        code: "UNKNOWN_FIELD",
+        message: "Unknown Freshsales field: source. Did you mean: cf_channel (Source Channel)?"
+      }
+    });
+  });
+
+  it("supports contains match mode for contact source and keeps unfiltered calls to one list request", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return { fields: [{ name: "id", label: "ID" }, { name: "cf_source", label: "Source" }, { name: "display_name", label: "Name" }] } as T;
+      }
+
+      return {
+        contacts: [
+          { id: 1, display_name: "Ada", custom_field: { cf_source: "Paid Meta - Summer" } },
+          { id: 2, display_name: "Grace", custom_field: { cf_source: "Organic" } }
+        ]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const exactPropose = await runTool(listContactsTool, { source: "paid", per_page: 10 }, ctx);
+    const exactApprove = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(exactPropose) }, ctx);
+    expect(exactApprove.payload).toMatchObject({ data: [] });
+
+    clearFieldSchemaCache();
+    const containsPropose = await runTool(listContactsTool, { source: "paid", match_mode: "contains", per_page: 10 }, ctx);
+    const containsApprove = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(containsPropose) }, ctx);
+    expect(containsApprove.payload).toMatchObject({ data: [{ id: 1, cf_source: "Paid Meta - Summer" }] });
+
+    get.mockClear();
+    const plainPropose = await runTool(listContactsTool, { per_page: 10 }, ctx);
+    const plainApprove = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(plainPropose) }, ctx);
+    expect(plainApprove.isError).toBe(false);
+    expect(get).toHaveBeenCalledWith("api/contacts/view/contact-view", {
+      query: { page: 1, per_page: 10, include: "owner,sales_account", sort: undefined, sort_type: undefined }
+    });
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it("returns INVALID_FILTER when a contact view name cannot be resolved", async () => {
@@ -645,6 +755,67 @@ describe("contact tools", () => {
 });
 
 describe("deal tools", () => {
+  it("scans multiple pages for deal filters including owner and date range", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { page?: number } }) => {
+      if (path === "api/settings/deals/fields") {
+        return { fields: [{ name: "id", label: "ID" }, { name: "name", label: "Name" }] } as T;
+      }
+
+      const page = Number(options?.query?.page ?? 1);
+      return {
+        deals: page === 1
+          ? [
+            { id: 1, name: "Wrong owner", owner: { first_name: "Ada" }, close_date: "2026-08-10", deal_stage: { name: "Open" } },
+            { id: 2, name: "Wrong date", owner: { first_name: "Grace" }, close_date: "2026-07-01", deal_stage: { name: "Open" } }
+          ]
+          : [
+            { id: 3, name: "Expansion", owner: { first_name: "Grace" }, close_date: "2026-08-15", deal_stage: { name: "Open" } }
+          ]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] }, appConfig: config({ dealsScanMaxPages: 5 }) });
+
+    const propose = await runTool(listDealsTool, { owner: "Grace", date_from: "2026-08-01", date_to: "2026-08-31", per_page: 2 }, ctx);
+    expect(propose.payload).toMatchObject({ estimated_call_count: 6 });
+    const approve = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 3, name: "Expansion" }],
+      scanned_records: 3,
+      truncated: false
+    });
+  });
+
+  it("supports contains match mode for deals and keeps unfiltered calls to one list request", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/deals/fields") {
+        return { fields: [{ name: "name", label: "Name" }] } as T;
+      }
+
+      return { deals: [{ id: 1, name: "Paid Meta Expansion" }, { id: 2, name: "Renewal" }] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const exactPropose = await runTool(listDealsTool, { filter_by: "name", filter_value: "paid", per_page: 10 }, ctx);
+    const exactApprove = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(exactPropose) }, ctx);
+    expect(exactApprove.payload).toMatchObject({ data: [] });
+
+    clearFieldSchemaCache();
+    const containsPropose = await runTool(listDealsTool, { filter_by: "name", filter_value: "paid", match_mode: "contains", per_page: 10 }, ctx);
+    const containsApprove = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(containsPropose) }, ctx);
+    expect(containsApprove.payload).toMatchObject({ data: [{ id: 1, name: "Paid Meta Expansion" }] });
+
+    get.mockClear();
+    const plainPropose = await runTool(listDealsTool, { per_page: 10 }, ctx);
+    const plainApprove = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(plainPropose) }, ctx);
+    expect(plainApprove.isError).toBe(false);
+    expect(get).toHaveBeenCalledWith("api/deals/view/deal-view", {
+      query: { page: 1, per_page: 10, include: "owner,sales_account,contacts,deal_stage", sort: undefined, sort_type: undefined }
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
   it("resolves a deal view by name before listing deals", async () => {
     const get = vi
       .fn()
@@ -709,6 +880,36 @@ describe("deal tools", () => {
     expect(get).toHaveBeenCalledTimes(2);
     expect(get).toHaveBeenNthCalledWith(1, "api/settings/deals/fields");
     expect(get).toHaveBeenNthCalledWith(2, "api/deals/filters");
+  });
+});
+
+describe("contacts summary", () => {
+  it("groups contacts by month across multiple scanned pages", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { page?: number } }) => {
+      const page = Number(options?.query?.page ?? 1);
+      return {
+        contacts: page === 1
+          ? Array.from({ length: 50 }, (_, index) => ({ id: index + 1, created_at: "2026-08-01T00:00:00Z" }))
+          : [
+            { id: 51, created_at: "2026-09-01T00:00:00Z" }
+          ]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] }, appConfig: config({ contactsScanMaxPages: 5 }) });
+
+    const propose = await runTool(contactsSummaryTool, { group_by: "month" }, ctx);
+    const approve = await runTool(contactsSummaryTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      group_by: "month",
+      scanned_records: 51,
+      truncated: false,
+      groups: [
+        { key: "2026-08", count: 50 },
+        { key: "2026-09", count: 1 }
+      ]
+    });
   });
 });
 

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { amountFromDeal, getCollection, linkedAccountFromDeal, linkedContactFromDeal, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal, weightedValueFromDeal } from "../freshsales/mappers.js";
+import { scanView } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { AppError } from "../utils/errors.js";
 import { isIsoDate } from "../utils/time.js";
@@ -9,6 +10,7 @@ import { approvalFields, defineTool } from "./common.js";
 
 const stageSchema = z.enum(["open", "won", "lost"]);
 const sortOrderSchema = z.enum(["asc", "desc"]);
+const matchModeSchema = z.enum(["exact", "contains"]);
 
 const schema = z
   .object({
@@ -17,6 +19,7 @@ const schema = z
     view: z.string().trim().min(1).max(100).optional(),
     filter_by: z.string().trim().min(1).max(100).optional(),
     filter_value: z.string().trim().min(1).max(200).optional(),
+    match_mode: matchModeSchema.default("exact"),
     sort_by: z.string().trim().min(1).max(100).optional(),
     sort_order: sortOrderSchema.default("asc"),
     owner: z.string().trim().min(1).max(100).optional(),
@@ -32,6 +35,7 @@ interface ListDealsParams {
   view?: string;
   filterBy?: string;
   filterValue?: string;
+  matchMode: "exact" | "contains";
   sortBy?: string;
   sortOrder: "asc" | "desc";
   owner?: string;
@@ -49,7 +53,7 @@ export const listDealsTool = defineTool({
   name: "list_deals",
   title: "List Deals",
   description:
-    "Preview or list live Freshsales deals from the configured default deals view, or pass view to target any saved Freshsales view by name or id. Field output, filter_by, and sort_by are validated against Freshsales deal field metadata.",
+    "Preview or list live Freshsales deals from the configured default deals view, or pass view to target any saved Freshsales view by name or id. Field output, filter_by, and sort_by are validated against Freshsales deal field metadata. Filtered queries scan up to DEALS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for filter_value.",
   inputSchema: schema,
   resolve(input): ListDealsParams {
     if (input.date_from && !isIsoDate(input.date_from)) {
@@ -65,6 +69,7 @@ export const listDealsTool = defineTool({
       view: input.view,
       filterBy: input.filter_by,
       filterValue: input.filter_value,
+      matchMode: input.match_mode,
       sortBy: input.sort_by,
       sortOrder: input.sort_order,
       owner: input.owner,
@@ -75,7 +80,8 @@ export const listDealsTool = defineTool({
     };
   },
   estimateCallCount(params, ctx) {
-    return (params.view ? 2 : 1) + (isFieldSchemaCacheMiss(ctx, "deals") ? 1 : 0);
+    const scanPages = shouldScan(params) ? ctx.config.dealsScanMaxPages : 1;
+    return (params.view ? 1 : 0) + scanPages + (isFieldSchemaCacheMiss(ctx, "deals") ? 1 : 0);
   },
   async execute(params, ctx) {
     const fieldSchema = await fetchFieldSchema(ctx, "deals");
@@ -86,21 +92,20 @@ export const listDealsTool = defineTool({
       : ctx.config.defaultDealsViewId;
     const nativeSort = sortField && nativeDealSortFields.has(sortField.name);
 
-    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/deals/view/${viewId}`, {
-      query: {
-        page: params.page,
-        per_page: params.perPage,
-        include: "owner,sales_account,contacts,deal_stage",
-        sort: nativeSort ? sortField.name : undefined,
-        sort_type: nativeSort ? params.sortOrder : undefined
-      }
-    });
+    const include = "owner,sales_account,contacts,deal_stage";
+    const rawDeals = shouldScan(params)
+      ? (await scanView(ctx, {
+        entity: "deals",
+        viewId,
+        perPage: params.perPage,
+        maxPages: ctx.config.dealsScanMaxPages,
+        include,
+        matches: deal => matchesDeal(deal, params, filterField)
+      }))
+      : await fetchDealsPage(ctx, viewId, params, include, nativeSort ? sortField?.name : undefined);
+    const dealsForOutput = "records" in rawDeals ? rawDeals.records : rawDeals;
 
-    const deals = getCollection(payload, "deals")
-      .filter(deal => matchesStage(deal, params.stage))
-      .filter(deal => matchesDynamicFilter(deal, filterField, params.filterValue))
-      .filter(deal => matchesOwner(deal, params.owner))
-      .filter(deal => matchesDateRange(deal, params.dateFrom, params.dateTo))
+    const deals = dealsForOutput
       .sort((left, right) => sortField && !nativeSort ? compareFieldValues(left, right, sortField, params.sortOrder) : 0)
       .map(deal => ({
         ...dynamicRecordFromSchema(deal, fieldSchema),
@@ -120,6 +125,8 @@ export const listDealsTool = defineTool({
       data: deals,
       page: params.page,
       per_page: params.perPage,
+      scanned_records: "scannedRecords" in rawDeals ? rawDeals.scannedRecords : dealsForOutput.length,
+      truncated: "truncated" in rawDeals ? rawDeals.truncated : false,
       filters_applied: {
         stage: params.stage ?? null,
         view: params.view ?? null,
@@ -130,7 +137,8 @@ export const listDealsTool = defineTool({
         sort_scope: params.sortBy ? (nativeSort ? "freshsales" : "page") : null,
         owner: params.owner ?? null,
         date_from: params.dateFrom ?? null,
-        date_to: params.dateTo ?? null
+        date_to: params.dateTo ?? null,
+        match_mode: params.matchMode
       }
     };
   },
@@ -138,6 +146,30 @@ export const listDealsTool = defineTool({
 });
 
 const nativeDealSortFields = new Set(["amount", "expected_close", "created_at", "updated_at", "last_contacted"]);
+
+function shouldScan(params: ListDealsParams): boolean {
+  return Boolean(params.stage || params.filterBy || params.owner || params.dateFrom || params.dateTo);
+}
+
+async function fetchDealsPage(
+  ctx: ToolExecutionContext,
+  viewId: string,
+  params: ListDealsParams,
+  include: string,
+  sortField?: string
+): Promise<Array<Record<string, unknown>>> {
+  const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/deals/view/${viewId}`, {
+    query: {
+      page: params.page,
+      per_page: params.perPage,
+      include,
+      sort: sortField,
+      sort_type: sortField ? params.sortOrder : undefined
+    }
+  });
+
+  return getCollection(payload, "deals");
+}
 
 async function resolveDealViewId(ctx: ToolExecutionContext, view: string): Promise<string> {
   const payload = await ctx.freshsales.get<FilterPayload>("api/deals/filters");
@@ -162,7 +194,19 @@ function matchesStage(record: Record<string, unknown>, stage?: "open" | "won" | 
   return normalizedDealLifecycle(record) === stage;
 }
 
-function matchesDynamicFilter(record: Record<string, unknown>, field: FreshsalesFieldDefinition | undefined, filterValue: string | undefined): boolean {
+function matchesDeal(record: Record<string, unknown>, params: ListDealsParams, filterField?: FreshsalesFieldDefinition): boolean {
+  return matchesStage(record, params.stage)
+    && matchesDynamicFilter(record, filterField, params.filterValue, params.matchMode)
+    && matchesOwner(record, params.owner)
+    && matchesDateRange(record, params.dateFrom, params.dateTo);
+}
+
+function matchesDynamicFilter(
+  record: Record<string, unknown>,
+  field: FreshsalesFieldDefinition | undefined,
+  filterValue: string | undefined,
+  matchMode: "exact" | "contains"
+): boolean {
   if (!field) {
     return true;
   }
@@ -171,7 +215,9 @@ function matchesDynamicFilter(record: Record<string, unknown>, field: Freshsales
     throw new AppError("MISSING_FILTER_VALUE", "filter_value is required when filter_by is provided.");
   }
 
-  return String(fieldValueFor(record, field) ?? "").toLowerCase() === filterValue.toLowerCase();
+  const candidate = String(fieldValueFor(record, field) ?? "").toLowerCase();
+  const expected = filterValue.toLowerCase();
+  return matchMode === "contains" ? candidate.includes(expected) : candidate === expected;
 }
 
 function compareFieldValues(left: Record<string, unknown>, right: Record<string, unknown>, field: FreshsalesFieldDefinition, order: "asc" | "desc"): number {

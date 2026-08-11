@@ -39,5 +39,9 @@ services:
         value: "60"
       - key: PIPELINE_SUMMARY_MAX_PAGES
         value: "5"
+      - key: CONTACTS_SCAN_MAX_PAGES
+        value: "10"
+      - key: DEALS_SCAN_MAX_PAGES
+        value: "10"
       - key: FIELD_SCHEMA_CACHE_TTL_MS
         value: "3600000"
