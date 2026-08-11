@@ -1,11 +1,14 @@
 import { z } from "zod";
 
 import { emailFromRecord, getCollection, nameFromRecord, ownerNameFromRecord } from "../freshsales/mappers.js";
+import { AppError } from "../utils/errors.js";
+import type { ToolExecutionContext } from "./common.js";
 import { approvalFields, defineTool } from "./common.js";
 
 const schema = z
   .object({
     ...approvalFields,
+    view: z.string().trim().min(1).max(100).optional(),
     source: z.string().trim().min(1).max(100).optional(),
     owner: z.string().trim().min(1).max(100).optional(),
     page: z.number().int().min(1).max(100).default(1),
@@ -14,31 +17,41 @@ const schema = z
   .strict();
 
 interface ListContactsParams {
+  view?: string;
   source?: string;
   owner?: string;
   page: number;
   perPage: number;
 }
 
+interface FilterPayload {
+  filters?: Array<{ id?: string | number; name?: string }>;
+}
+
 export const listContactsTool = defineTool({
   name: "list_contacts",
   title: "List Contacts",
   description:
-    "Preview or list live Freshsales contacts from the configured default contacts view. Optional source and owner filters are applied after fetching the view page.",
+    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Optional source and owner filters are applied after fetching the view page.",
   inputSchema: schema,
   resolve(input): ListContactsParams {
     return {
+      view: input.view,
       source: input.source,
       owner: input.owner,
       page: input.page,
       perPage: input.per_page
     };
   },
-  estimateCallCount() {
-    return 1;
+  estimateCallCount(params) {
+    return params.view ? 2 : 1;
   },
   async execute(params, ctx) {
-    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/contacts/view/${ctx.config.defaultContactsViewId}`, {
+    const viewId = params.view
+      ? await resolveContactViewId(ctx, params.view)
+      : ctx.config.defaultContactsViewId;
+
+    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/contacts/view/${viewId}`, {
       query: {
         page: params.page,
         per_page: params.perPage,
@@ -68,6 +81,7 @@ export const listContactsTool = defineTool({
       page: params.page,
       per_page: params.perPage,
       filters_applied: {
+        view: params.view ?? null,
         source: params.source ?? null,
         owner: params.owner ?? null
       }
@@ -75,6 +89,21 @@ export const listContactsTool = defineTool({
   },
   willCallFreshsales: true
 });
+
+async function resolveContactViewId(ctx: ToolExecutionContext, view: string): Promise<string> {
+  const payload = await ctx.freshsales.get<FilterPayload>("api/contacts/filters");
+  const matched = payload.filters?.find(candidate => {
+    const id = candidate.id !== undefined ? String(candidate.id) : "";
+    const name = candidate.name?.toLowerCase() ?? "";
+    return id === view || name === view.toLowerCase();
+  });
+
+  if (!matched?.id) {
+    throw new AppError("INVALID_FILTER", `Unknown Freshsales contact filter: ${view}.`);
+  }
+
+  return String(matched.id);
+}
 
 function matchesSource(record: Record<string, unknown>, source?: string): boolean {
   if (!source) {

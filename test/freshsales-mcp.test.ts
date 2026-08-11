@@ -7,6 +7,7 @@ import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { getContactTool } from "../src/tools/getContact.js";
 import { listContactsTool } from "../src/tools/listContacts.js";
+import { listDealsTool } from "../src/tools/listDeals.js";
 import { searchContactsTool } from "../src/tools/searchContacts.js";
 import { runTool, type ToolExecutionContext } from "../src/tools/common.js";
 import type { Logger } from "../src/types.js";
@@ -448,6 +449,109 @@ describe("contact tools", () => {
         owner: null
       }
     });
+  });
+
+  it("resolves a contact view by name before listing contacts", async () => {
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ filters: [{ id: "paid-meta-view", name: "Paid_meta" }] })
+      .mockResolvedValueOnce({ contacts: [{ id: 1, first_name: "Ada", last_name: "Lovelace" }] });
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(listContactsTool, { view: "Paid_meta", page: 1, per_page: 25 }, ctx);
+    expect(propose.payload).toMatchObject({ estimated_call_count: 2 });
+
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(get).toHaveBeenNthCalledWith(1, "api/contacts/filters");
+    expect(get).toHaveBeenNthCalledWith(2, "api/contacts/view/paid-meta-view", {
+      query: { page: 1, per_page: 25, include: "owner" }
+    });
+    expect(approve.payload).toMatchObject({
+      filters_applied: {
+        view: "Paid_meta"
+      }
+    });
+  });
+
+  it("returns INVALID_FILTER when a contact view name cannot be resolved", async () => {
+    const get = vi.fn(async <T>() => ({ filters: [{ id: "all", name: "All Contacts" }] }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(listContactsTool, { view: "Paid_meta" }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(true);
+    expect(approve.payload).toMatchObject({
+      error: {
+        code: "INVALID_FILTER",
+        message: "Unknown Freshsales contact filter: Paid_meta."
+      }
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith("api/contacts/filters");
+  });
+});
+
+describe("deal tools", () => {
+  it("resolves a deal view by name before listing deals", async () => {
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ filters: [{ id: "paid-meta-deals", name: "Paid_meta" }] })
+      .mockResolvedValueOnce({ deals: [{ id: 5, name: "Expansion", amount: "1200", deal_stage: { name: "Won" } }] });
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(listDealsTool, { view: "Paid_meta", page: 1, per_page: 25 }, ctx);
+    expect(propose.payload).toMatchObject({ estimated_call_count: 2 });
+
+    const approve = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(get).toHaveBeenNthCalledWith(1, "api/deals/filters");
+    expect(get).toHaveBeenNthCalledWith(2, "api/deals/view/paid-meta-deals", {
+      query: { page: 1, per_page: 25, include: "owner,sales_account,contacts,deal_stage" }
+    });
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 5, name: "Expansion", amount: 1200, stage: "Won" }],
+      filters_applied: {
+        view: "Paid_meta"
+      }
+    });
+  });
+
+  it("returns INVALID_FILTER when a deal view name cannot be resolved", async () => {
+    const get = vi.fn(async <T>() => ({ filters: [{ id: "all", name: "All Deals" }] }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"]
+      }
+    });
+
+    const propose = await runTool(listDealsTool, { view: "Paid_meta" }, ctx);
+    const approve = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(true);
+    expect(approve.payload).toMatchObject({
+      error: {
+        code: "INVALID_FILTER",
+        message: "Unknown Freshsales deal filter: Paid_meta."
+      }
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith("api/deals/filters");
   });
 });
 
