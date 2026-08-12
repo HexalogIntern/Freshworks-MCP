@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { amountFromDeal, getCollection, linkedAccountFromDeal, linkedContactFromDeal, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal, weightedValueFromDeal } from "../freshsales/mappers.js";
+import { nativeFilteredSearch } from "../freshsales/nativeFilter.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationIncludeForField, resolveFieldAlias, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { cachedViewsForFilter } from "../freshsales/viewCache.js";
@@ -78,6 +79,10 @@ export const listDealsTool = defineTool({
     };
   },
   estimateCallCount(params, ctx) {
+    if (canUseNativeFilter(params)) {
+      return 1 + (isFieldSchemaCacheMiss(ctx, "deals") ? 1 : 0);
+    }
+
     const multiView = shouldScanAllViews(params);
     const cachedViewCount = multiView
       ? cachedViewsForFilter("deals", ctx.config, {
@@ -97,7 +102,9 @@ export const listDealsTool = defineTool({
     const filterField = filterResolution?.apiField;
     const sortResolution = params.sortBy ? resolveFieldAlias(fieldSchema, params.sortBy) : undefined;
     const sortField = sortResolution?.apiField;
-    const viewId = params.view
+    const viewId = canUseNativeFilter(params)
+      ? ctx.config.defaultDealsViewId
+      : params.view
       ? await resolveDealViewId(ctx, params.view)
       : ctx.config.defaultDealsViewId;
     const nativeSort = sortField && nativeDealSortFields.has(sortField.name);
@@ -107,7 +114,16 @@ export const listDealsTool = defineTool({
       relationIncludeForField(filterField?.name ?? ""),
       relationIncludeForField(sortField?.name ?? "")
     );
-    const rawDeals = shouldScanAllViews(params)
+    const rawDeals = canUseNativeFilter(params)
+      ? await nativeFilteredSearch(ctx, "deals", nativeDealConditions(params, filterField), {
+        page: params.page,
+        perPage: params.perPage,
+        sortField: nativeSort ? sortField?.name : undefined,
+        sortOrder: params.sortOrder
+      })
+      : shouldScan(params)
+      ? unsupportedNativeDealFilter(params)
+      : shouldScanAllViews(params)
       ? await scanViews(ctx, {
         entity: "deals",
         views: await dealViewsForScan(ctx, {
@@ -153,6 +169,8 @@ export const listDealsTool = defineTool({
       data: deals,
       page: params.page,
       per_page: params.perPage,
+      total: "total" in rawDeals ? rawDeals.total : null,
+      native_filtered: "nativeFiltered" in rawDeals ? rawDeals.nativeFiltered : false,
       scanned_records: "scannedRecords" in rawDeals ? rawDeals.scannedRecords : dealsForOutput.length,
       views_scanned: "viewsScanned" in rawDeals ? rawDeals.viewsScanned : [],
       views_skipped_due_to_cap: "viewsSkippedDueToCap" in rawDeals ? rawDeals.viewsSkippedDueToCap : [],
@@ -172,7 +190,8 @@ export const listDealsTool = defineTool({
         owner: params.owner ?? null,
         date_from: params.dateFrom ?? null,
         date_to: params.dateTo ?? null,
-        match_mode: params.matchMode
+        match_mode: params.matchMode,
+        native_filter_rule: "filterRule" in rawDeals ? rawDeals.filterRule : null
       }
     };
   },
@@ -187,6 +206,35 @@ function shouldScan(params: ListDealsParams): boolean {
 
 function shouldScanAllViews(params: ListDealsParams): boolean {
   return shouldScan(params) && !params.view;
+}
+
+function canUseNativeFilter(params: ListDealsParams): boolean {
+  return Boolean(params.filterBy && !params.stage && !params.owner && !params.dateFrom && !params.dateTo);
+}
+
+function unsupportedNativeDealFilter(params: ListDealsParams): never {
+  const unsupported = [
+    params.stage ? "stage" : null,
+    params.owner ? "owner" : null,
+    params.dateFrom ? "date_from" : null,
+    params.dateTo ? "date_to" : null
+  ].filter(Boolean).join(", ");
+  throw new AppError(
+    "UNSUPPORTED_NATIVE_FILTER",
+    `This deal query is not executed because it would require capped client-side scanning (${unsupported || "unsupported filter combination"}). Use filter_by with a Freshsales field that is exposed by metadata, or add native support for this combination.`
+  );
+}
+
+function nativeDealConditions(params: ListDealsParams, filterField?: FreshsalesFieldDefinition) {
+  if (!filterField) {
+    return [];
+  }
+
+  if (!params.filterValue) {
+    throw new AppError("MISSING_FILTER_VALUE", "filter_value is required when filter_by is provided.");
+  }
+
+  return [{ field: filterField, value: params.filterValue, matchMode: params.matchMode }];
 }
 
 async function dealViewsForScan(ctx: ToolExecutionContext, filter?: { field?: string; value?: string }) {

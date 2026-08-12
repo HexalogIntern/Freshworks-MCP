@@ -1,6 +1,7 @@
 import type { JsonRecord } from "../types.js";
 import type { ToolDefinition } from "./common.js";
 import { contactsSummaryTool } from "./contactsSummary.js";
+import { countContactsTool, countDealsTool } from "./countRecords.js";
 import { discoverFieldsTool } from "./discoverFields.js";
 import { discoverViewsTool } from "./discoverViews.js";
 import { getContactTool } from "./getContact.js";
@@ -16,8 +17,10 @@ export const toolDefinitions: Array<ToolDefinition<any, any, JsonRecord>> = [
   discoverFieldsTool,
   discoverViewsTool,
   listContactsTool,
+  countContactsTool,
   getContactTool,
   listDealsTool,
+  countDealsTool,
   getDealTool,
   searchContactsTool,
   listNotesTool,

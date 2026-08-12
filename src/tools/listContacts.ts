@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { contactStatusNameForId, fetchContactStatusLookup, isContactStatusCacheMiss, type ContactStatusLookup } from "../freshsales/contactStatusCache.js";
 import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
+import { nativeFilteredSearch } from "../freshsales/nativeFilter.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldComparableValues, isFieldSchemaCacheMiss, mergeIncludes, relationDisplayValue, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { cachedViewsForFilter } from "../freshsales/viewCache.js";
@@ -81,6 +82,12 @@ export const listContactsTool = defineTool({
     };
   },
   estimateCallCount(params, ctx) {
+    if (canUseNativeFilter(params)) {
+      return 1
+        + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0)
+        + (params.filterBy && looksLikeStatusField(params.filterBy) && isContactStatusCacheMiss(ctx) ? 1 : 0);
+    }
+
     const multiView = shouldScanAllViews(params);
     const cachedViewCount = multiView
       ? cachedViewsForFilter("contacts", ctx.config, {
@@ -98,6 +105,14 @@ export const listContactsTool = defineTool({
       + typicalHydrationCalls;
   },
   estimateCallCountDetails(params, ctx, estimatedCallCount) {
+    if (canUseNativeFilter(params)) {
+      return {
+        estimated_call_count_typical: estimatedCallCount,
+        estimated_call_count_worst_case: estimatedCallCount,
+        estimate_note: "Native Freshsales filtered_search is used; totals come from Freshsales meta.total and are not scan-capped."
+      };
+    }
+
     const multiView = shouldScanAllViews(params);
     const cachedViewCount = multiView
       ? cachedViewsForFilter("contacts", ctx.config, {
@@ -138,7 +153,9 @@ export const listContactsTool = defineTool({
     const contactStatusLookup = filterField?.name === "contact_status_id" || sortField?.name === "contact_status_id"
       ? await fetchContactStatusLookup(ctx)
       : undefined;
-    const viewId = params.view
+    const viewId = canUseNativeFilter(params)
+      ? ctx.config.defaultContactsViewId
+      : params.view
       ? await resolveContactViewId(ctx, params.view)
       : ctx.config.defaultContactsViewId;
 
@@ -153,7 +170,23 @@ export const listContactsTool = defineTool({
       relationIncludeForField(filterField?.name ?? ""),
       relationIncludeForField(sortField?.name ?? "")
     );
-    const rawContacts = shouldScanAllViews(params)
+    const rawContacts = canUseNativeFilter(params)
+      ? await nativeFilteredSearch(ctx, "contacts", nativeContactConditions({
+        sourceField,
+        source: params.source,
+        filterField,
+        filterValue: params.filterValue,
+        matchMode: params.matchMode,
+        contactStatusLookup
+      }), {
+        page: params.page,
+        perPage: params.perPage,
+        sortField: nativeSort ? sortField?.name : undefined,
+        sortOrder: params.sortOrder
+      })
+      : shouldScan(params)
+      ? unsupportedNativeContactFilter(params)
+      : shouldScanAllViews(params)
       ? await scanViews(ctx, {
         entity: "contacts",
         views: await contactViewsForScan(ctx, {
@@ -220,6 +253,8 @@ export const listContactsTool = defineTool({
       data: contacts,
       page: params.page,
       per_page: params.perPage,
+      total: "total" in rawContacts ? rawContacts.total : null,
+      native_filtered: "nativeFiltered" in rawContacts ? rawContacts.nativeFiltered : false,
       scanned_records: "scannedRecords" in rawContacts ? rawContacts.scannedRecords : contactsForOutput.length,
       views_scanned: "viewsScanned" in rawContacts ? rawContacts.viewsScanned : [],
       views_skipped_due_to_cap: "viewsSkippedDueToCap" in rawContacts ? rawContacts.viewsSkippedDueToCap : [],
@@ -240,7 +275,8 @@ export const listContactsTool = defineTool({
         owner: params.owner ?? null,
         date_from: params.dateFrom ?? null,
         date_to: params.dateTo ?? null,
-        match_mode: params.matchMode
+        match_mode: params.matchMode,
+        native_filter_rule: "filterRule" in rawContacts ? rawContacts.filterRule : null
       }
     };
   },
@@ -255,6 +291,64 @@ function shouldScan(params: ListContactsParams): boolean {
 
 function shouldScanAllViews(params: ListContactsParams): boolean {
   return shouldScan(params) && !params.view;
+}
+
+function canUseNativeFilter(params: ListContactsParams): boolean {
+  return Boolean((params.source || params.filterBy) && !params.owner && !params.dateFrom && !params.dateTo);
+}
+
+function unsupportedNativeContactFilter(params: ListContactsParams): never {
+  const unsupported = [
+    params.owner ? "owner" : null,
+    params.dateFrom ? "date_from" : null,
+    params.dateTo ? "date_to" : null
+  ].filter(Boolean).join(", ");
+  throw new AppError(
+    "UNSUPPORTED_NATIVE_FILTER",
+    `This contact query is not executed because it would require capped client-side scanning (${unsupported || "unsupported filter combination"}). Use filter_by with a Freshsales field that is exposed by metadata, or add native support for this combination.`
+  );
+}
+
+function nativeContactConditions(filters: {
+  sourceField?: FreshsalesFieldDefinition;
+  source?: string;
+  filterField?: FreshsalesFieldDefinition;
+  filterValue?: string;
+  matchMode: "exact" | "contains";
+  contactStatusLookup?: ContactStatusLookup;
+}) {
+  const conditions = [];
+  if (filters.sourceField && filters.source) {
+    conditions.push({ field: filters.sourceField, value: filters.source, matchMode: filters.matchMode });
+  }
+
+  if (filters.filterField) {
+    if (!filters.filterValue) {
+      throw new AppError("MISSING_FILTER_VALUE", "filter_value is required when filter_by is provided.");
+    }
+
+    const filterValue = filters.filterField.name === "contact_status_id"
+      ? contactStatusIdForName(filters.contactStatusLookup, filters.filterValue) ?? filters.filterValue
+      : filters.filterValue;
+    conditions.push({ field: filters.filterField, value: filterValue, matchMode: filters.matchMode });
+  }
+
+  return conditions;
+}
+
+function contactStatusIdForName(lookup: ContactStatusLookup | undefined, name: string): string | null {
+  if (!lookup) {
+    return null;
+  }
+
+  const normalized = name.trim().toLowerCase();
+  for (const [id, statusName] of lookup.idToName.entries()) {
+    if (statusName.trim().toLowerCase() === normalized) {
+      return id;
+    }
+  }
+
+  return null;
 }
 
 async function contactViewsForScan(ctx: ToolExecutionContext, filter?: { field?: string; value?: string }) {

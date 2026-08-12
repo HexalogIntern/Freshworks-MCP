@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { contactStatusNameForId, fetchContactStatusLookup, isContactStatusCacheMiss, type ContactStatusLookup } from "../freshsales/contactStatusCache.js";
 import { contactStatusFromRecord } from "../freshsales/mappers.js";
+import { nativeFilteredSearch } from "../freshsales/nativeFilter.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { AppError } from "../utils/errors.js";
@@ -37,43 +38,67 @@ export const contactsSummaryTool = defineTool({
   },
   estimateCallCount(params, ctx) {
     const groupBy = normalizeGroupInput(params.groupBy);
-    const scanCalls = groupBy === "source"
-      ? ctx.config.contactsScanMaxPages * ctx.config.contactsScanMaxViews + 1
-      : ctx.config.contactsScanMaxPages;
-    return scanCalls
-      + (groupBy !== "month" && isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0)
-      + (groupBy === "status" && isContactStatusCacheMiss(ctx) ? 1 : 0);
+    if (groupBy !== "month") {
+      return 20 + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0);
+    }
+
+    return ctx.config.contactsScanMaxPages;
   },
   async execute(params, ctx) {
     const perPage = 50;
     const fieldSchema = normalizeGroupInput(params.groupBy) === "month" ? [] : await fetchFieldSchema(ctx, "contacts");
     const groupResolution = resolveContactGroup(params.groupBy, fieldSchema);
-    const sourceField = groupResolution.groupBy === "source" ? validateFieldName(fieldSchema, "source") : undefined;
-    const contactStatusLookup = groupResolution.groupBy === "status" ? await fetchContactStatusLookup(ctx) : undefined;
+    if (groupResolution.groupBy === "status") {
+      const lookup = await fetchContactStatusLookup(ctx);
+      const groups = await nativeStatusGroups(ctx, groupResolution.apiField, lookup);
+      return {
+        group_by: params.groupBy,
+        group_api_field: groupResolution.apiField?.name ?? "contact_status_id",
+        group_ui_label: groupResolution.apiField?.label ?? "Status",
+        scanned_records: 0,
+        native_filtered: true,
+        views_scanned: [],
+        views_skipped_due_to_cap: [],
+        truncated: false,
+        groups
+      };
+    }
+
+    if (groupResolution.apiField?.choices && groupResolution.apiField.choices.length > 0) {
+      const groups = await nativeChoiceGroups(ctx, groupResolution.apiField);
+      return {
+        group_by: params.groupBy,
+        group_api_field: groupResolution.apiField.name,
+        group_ui_label: groupResolution.apiField.label ?? null,
+        scanned_records: 0,
+        native_filtered: true,
+        views_scanned: [],
+        views_skipped_due_to_cap: [],
+        truncated: false,
+        groups
+      };
+    }
+
+    if (groupResolution.groupBy !== "month") {
+      throw new AppError(
+        "UNSUPPORTED_NATIVE_GROUP_BY",
+        `contacts_summary group_by=${params.groupBy} is not executed because Freshsales does not expose a native aggregate for this non-dropdown field and a capped scan would be partial. Use count_contacts for exact counts of a specific value.`
+      );
+    }
+
     const include = mergeIncludes("owner,sales_account", relationIncludeForField(groupResolution.apiField?.name ?? ""));
-    const scan = groupResolution.groupBy === "source"
-      ? await scanViews(ctx, {
-        entity: "contacts",
-        views: await contactViewsForScan(ctx),
-        maxViews: ctx.config.contactsScanMaxViews,
-        perPage,
-        maxPages: ctx.config.contactsScanMaxPages,
-        include,
-        annotateMatchedView: true,
-        matches: () => true
-      })
-      : await scanView(ctx, {
-        entity: "contacts",
-        viewId: ctx.config.defaultContactsViewId,
-        perPage,
-        maxPages: ctx.config.contactsScanMaxPages,
-        include,
-        matches: () => true
-      });
+    const scan = await scanView(ctx, {
+      entity: "contacts",
+      viewId: ctx.config.defaultContactsViewId,
+      perPage,
+      maxPages: ctx.config.contactsScanMaxPages,
+      include,
+      matches: () => true
+    });
     const groups = new Map<string, number>();
 
     for (const contact of scan.records) {
-      const key = groupKey(groupResolution.groupBy, contact, sourceField, contactStatusLookup);
+      const key = groupKey(groupResolution.groupBy, contact);
       groups.set(key, (groups.get(key) ?? 0) + 1);
     }
 
@@ -116,6 +141,43 @@ function groupKey(
   }
 
   return contactStatusNameForId(contactStatusLookup, contact.contact_status_id) ?? contactStatusFromRecord(contact) ?? "Unknown";
+}
+
+async function nativeChoiceGroups(ctx: Parameters<typeof nativeFilteredSearch>[0], field: FreshsalesFieldDefinition): Promise<Array<{ key: string; count: number }>> {
+  const groups: Array<{ key: string; count: number }> = [];
+  for (const choice of field.choices ?? []) {
+    const choiceRecord = asRecord(choice);
+    const label = scalarString(choiceRecord.value) ?? scalarString(choiceRecord.label) ?? scalarString(choiceRecord.name);
+    if (!label) {
+      continue;
+    }
+
+    const result = await nativeFilteredSearch(ctx, "contacts", [{ field, value: label, matchMode: "exact" }], {
+      page: 1,
+      perPage: 1
+    });
+    groups.push({ key: label, count: result.total ?? result.records.length });
+  }
+
+  return groups.filter(group => group.count > 0);
+}
+
+async function nativeStatusGroups(
+  ctx: Parameters<typeof nativeFilteredSearch>[0],
+  field: FreshsalesFieldDefinition | undefined,
+  lookup: ContactStatusLookup
+): Promise<Array<{ key: string; count: number }>> {
+  const statusField = field ?? { name: "contact_status_id", label: "Status" };
+  const groups: Array<{ key: string; count: number }> = [];
+  for (const [id, name] of lookup.idToName.entries()) {
+    const result = await nativeFilteredSearch(ctx, "contacts", [{ field: statusField, value: id, matchMode: "exact" }], {
+      page: 1,
+      perPage: 1
+    });
+    groups.push({ key: name, count: result.total ?? result.records.length });
+  }
+
+  return groups.filter(group => group.count > 0);
 }
 
 function resolveContactGroup(groupBy: string, fields: FreshsalesFieldDefinition[]): {
@@ -168,4 +230,20 @@ function normalizeSourceViewName(viewName: string): string {
   }
 
   return "";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function scalarString(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return null;
 }

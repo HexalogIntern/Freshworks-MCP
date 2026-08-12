@@ -15,6 +15,8 @@ export interface FreshsalesFieldDefinition {
   type?: string;
   default?: boolean;
   choices?: unknown[];
+  choiceLabelById?: Record<string, string>;
+  choiceIdByLabel?: Record<string, string>;
 }
 
 export interface FieldAliasResolution {
@@ -180,7 +182,8 @@ export function relationDisplayValue(record: Record<string, unknown>, field: Fre
 }
 
 export function fieldComparableValues(record: Record<string, unknown>, field: FreshsalesFieldDefinition): unknown[] {
-  const values = [relationDisplayValue(record, field), fieldValueFor(record, field)];
+  const rawValue = fieldValueFor(record, field);
+  const values = [choiceDisplayValue(field, rawValue), relationDisplayValue(record, field), rawValue];
   return values.filter((value, index) => {
     if (value === undefined || value === null || String(value).trim() === "") {
       return false;
@@ -188,6 +191,21 @@ export function fieldComparableValues(record: Record<string, unknown>, field: Fr
 
     return values.findIndex(candidate => String(candidate) === String(value)) === index;
   });
+}
+
+export function resolveFilterValueForField(field: FreshsalesFieldDefinition, requested: string): string | number {
+  const trimmed = requested.trim();
+  const choiceId = field.choiceIdByLabel?.[normalizeAliasKey(trimmed)];
+  return choiceId ?? trimmed;
+}
+
+export function choiceDisplayValue(field: FreshsalesFieldDefinition, rawValue: unknown): unknown {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === "") {
+    return rawValue;
+  }
+
+  const raw = String(rawValue);
+  return field.choiceLabelById?.[raw] ?? (field.choiceLabelById ? `Unresolved (id: ${raw})` : rawValue);
 }
 
 function resolveFieldValue(
@@ -213,14 +231,42 @@ function normalizeFieldDefinition(value: unknown): FreshsalesFieldDefinition | n
     return null;
   }
 
+  const choices = Array.isArray(record.choices) ? record.choices : undefined;
+  const choiceMaps = buildChoiceMaps(choices);
+
   return {
     id: record.id as string | number | undefined,
     label: stringValue(record.label) ?? undefined,
     name,
     type: stringValue(record.type) ?? undefined,
     default: typeof record.default === "boolean" ? record.default : undefined,
-    choices: Array.isArray(record.choices) ? record.choices : undefined
+    choices,
+    choiceLabelById: choiceMaps.labelById,
+    choiceIdByLabel: choiceMaps.idByLabel
   };
+}
+
+function buildChoiceMaps(choices: unknown[] | undefined): {
+  labelById?: Record<string, string>;
+  idByLabel?: Record<string, string>;
+} {
+  if (!choices) {
+    return {};
+  }
+
+  const labelById: Record<string, string> = {};
+  const idByLabel: Record<string, string> = {};
+  for (const choice of choices) {
+    const record = asRecord(choice);
+    const id = scalarString(record.id);
+    const label = stringValue(record.value) ?? stringValue(record.label) ?? stringValue(record.name);
+    if (id && label) {
+      labelById[id] = label;
+      idByLabel[normalizeAliasKey(label)] = id;
+    }
+  }
+
+  return { labelById, idByLabel };
 }
 
 function closestFieldMatches(fields: FreshsalesFieldDefinition[], requested: string): string[] {
@@ -257,6 +303,18 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function scalarString(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return null;
 }
 
 async function readPersistedFieldSchema(

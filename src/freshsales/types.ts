@@ -1,5 +1,6 @@
 export interface FreshsalesRequestOptions {
   query?: Record<string, string | number | boolean | undefined>;
+  body?: unknown;
 }
 
 export interface FreshsalesRateLimitSnapshot {
@@ -10,4 +11,5 @@ export interface FreshsalesRateLimitSnapshot {
 
 export interface FreshsalesClientLike {
   get<T>(path: string, options?: FreshsalesRequestOptions): Promise<T>;
+  post<T>(path: string, options?: FreshsalesRequestOptions): Promise<T>;
 }

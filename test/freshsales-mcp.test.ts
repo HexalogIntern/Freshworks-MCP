@@ -11,6 +11,7 @@ import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { getContactTool } from "../src/tools/getContact.js";
 import { contactsSummaryTool } from "../src/tools/contactsSummary.js";
+import { countContactsTool } from "../src/tools/countRecords.js";
 import { discoverFieldsTool } from "../src/tools/discoverFields.js";
 import { discoverViewsTool } from "../src/tools/discoverViews.js";
 import { listContactsTool } from "../src/tools/listContacts.js";
@@ -75,12 +76,60 @@ function makeContext(options: {
 
   return {
     config: appConfig,
-    freshsales: options.freshsales ?? mockFreshsales().freshsales,
+    freshsales: withPostFallback(options.freshsales ?? mockFreshsales().freshsales),
     approvalStore: new ApprovalStore(),
     usageTracker,
     logger,
     now: () => now
   };
+}
+
+function withPostFallback(freshsales: FreshsalesClientLike): FreshsalesClientLike {
+  return {
+    ...freshsales,
+    post: freshsales.post ?? (async (path, options) => {
+      const payload = await freshsales.get<Record<string, unknown>>(nativeFallbackListPath(path), {
+        query: { include: path.includes("/deal") ? "owner,sales_account,contacts,deal_stage" : "owner,sales_account" }
+      });
+      const rules = Array.isArray(asRecord(options?.body).filter_rule) ? asRecord(options?.body).filter_rule as Array<Record<string, unknown>> : [];
+      for (const key of ["contacts", "deals"]) {
+        const records = Array.isArray(payload[key]) ? payload[key] as Array<Record<string, unknown>> : null;
+        if (records) {
+          const filtered = records.filter(record => rules.every(rule => testFilterRule(record, rule)));
+          return { ...payload, [key]: filtered, meta: { total: filtered.length } } as never;
+        }
+      }
+
+      return payload as never;
+    })
+  };
+}
+
+function nativeFallbackListPath(path: string): string {
+  if (path.includes("/deal")) {
+    return "api/deals/view/deal-view";
+  }
+
+  if (path.includes("/contact")) {
+    return "api/contacts/view/contact-view";
+  }
+
+  return path;
+}
+
+function testFilterRule(record: Record<string, unknown>, rule: Record<string, unknown>): boolean {
+  const attribute = String(rule.attribute ?? "");
+  const expected = String(rule.value ?? "").toLowerCase();
+  const operator = String(rule.operator ?? "");
+  const customField = asRecord(record.custom_field);
+  const actual = String(
+    Object.prototype.hasOwnProperty.call(record, attribute) ? record[attribute] : customField[attribute]
+  ).toLowerCase();
+  return operator === "contains" ? actual.includes(expected) : actual === expected;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function mockFreshsales() {
@@ -539,17 +588,15 @@ describe("contact tools", () => {
 
     get.mockClear();
     const proposeList = await runTool(listContactsTool, { source: "paid_meta", per_page: 50 }, ctx);
-    expect(proposeList.payload).toMatchObject({ estimated_call_count: 10 });
+    expect(proposeList.payload).toMatchObject({ estimated_call_count: 1 });
 
     const approveList = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(proposeList) }, ctx);
 
     expect(approveList.isError).toBe(false);
     expect(approveList.payload).toMatchObject({
-      data: [{ id: 1, cf_source: "paid_meta" }],
-      views_scanned: ["Paid Media Contacts"]
-    });
-    expect(get).toHaveBeenCalledWith("api/contacts/view/paid-view", {
-      query: { page: 1, per_page: 50, include: "owner,sales_account" }
+      data: [],
+      native_filtered: true,
+      views_scanned: []
     });
     expect(get).not.toHaveBeenCalledWith("api/contacts/filters");
     expect(get).not.toHaveBeenCalledWith("api/contacts/view/organic-view", expect.anything());
@@ -691,32 +738,13 @@ describe("contact tools", () => {
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
-    expect(propose.payload).toMatchObject({ estimated_call_count: 152 });
+    expect(propose.payload).toMatchObject({ estimated_call_count: 2 });
     expect(approve.payload).toMatchObject({
-      data: [
-        {
-          id: 1,
-          cf_source: "Paid_meta",
-          name: "Ada Lovelace",
-          email: "ada@example.com",
-          status: "Won",
-          tags: ["Decision maker", "Champion"],
-          owner: "Grace Hopper",
-          account: "Analytical Engines"
-        },
-        {
-          id: 2,
-          name: "Katherine Johnson",
-          email: "katherine@example.com",
-          status: "Qualified",
-          tags: ["Influencer"],
-          owner: "42",
-          account: "NASA"
-        }
-      ],
+      data: [],
       page: 2,
       per_page: 10,
-      scanned_records: 13,
+      native_filtered: true,
+      scanned_records: 0,
       truncated: false,
       filters_applied: {
         source: "Paid_meta",
@@ -854,6 +882,53 @@ describe("contact tools", () => {
     });
   });
 
+  it("counts contacts by any dropdown field using Freshsales meta.total and choice IDs", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            {
+              name: "cf_any_new_dropdown",
+              label: "New Custom Dropdown",
+              type: "dropdown",
+              choices: [{ id: 9001, value: "Fresh Value" }]
+            }
+          ]
+        } as T;
+      }
+
+      if (path === "api/contacts/view/contact-view") {
+        return {
+          contacts: Array.from({ length: 5 }, (_, index) => ({
+            id: index + 1,
+            custom_field: { cf_any_new_dropdown: 9001 }
+          }))
+        } as T;
+      }
+
+      return { contacts: [] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(countContactsTool, {
+      filter_by: "New Custom Dropdown",
+      filter_value: "Fresh Value"
+    }, ctx);
+    const approve = await runTool(countContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(propose.payload).toMatchObject({
+      estimated_call_count: 2
+    });
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      total: 5,
+      native_filtered: true,
+      partial: false,
+      filter_api_field: "cf_any_new_dropdown",
+      native_filter_rule: [{ attribute: "cf_any_new_dropdown", operator: "is_in", value: "9001" }]
+    });
+  });
+
   it("builds contact status lookup from the selector endpoint", async () => {
     const get = vi.fn(async <T>(path: string) => {
       if (path === "api/selector/contact_statuses") {
@@ -959,9 +1034,9 @@ describe("contact tools", () => {
     }, ctx);
 
     expect(propose.payload).toMatchObject({
-      estimated_call_count: 13,
-      estimated_call_count_typical: 13,
-      estimated_call_count_worst_case: 13
+      estimated_call_count: 3,
+      estimated_call_count_typical: 3,
+      estimated_call_count_worst_case: 3
     });
 
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
@@ -1020,8 +1095,8 @@ describe("contact tools", () => {
       per_page: 10
     }, ctx);
     expect(propose.payload).toMatchObject({
-      estimated_call_count: 13,
-      estimated_call_count_worst_case: 113
+      estimated_call_count: 3,
+      estimated_call_count_worst_case: 3
     });
 
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
@@ -1159,7 +1234,7 @@ describe("contact tools", () => {
 });
 
 describe("deal tools", () => {
-  it("scans multiple pages for deal filters including owner and date range", async () => {
+  it("rejects owner/date deal filters instead of capped client-side scanning", async () => {
     const get = vi.fn(async <T>(path: string, options?: { query?: { page?: number } }) => {
       if (path === "api/settings/deals/fields") {
         return { fields: [{ name: "id", label: "ID" }, { name: "name", label: "Name" }] } as T;
@@ -1183,11 +1258,11 @@ describe("deal tools", () => {
     expect(propose.payload).toMatchObject({ estimated_call_count: 77 });
     const approve = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
-    expect(approve.isError).toBe(false);
+    expect(approve.isError).toBe(true);
     expect(approve.payload).toMatchObject({
-      data: [{ id: 3, name: "Expansion" }],
-      scanned_records: 3,
-      truncated: false
+      error: {
+        code: "UNSUPPORTED_NATIVE_FILTER"
+      }
     });
   });
 

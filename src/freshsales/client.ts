@@ -46,10 +46,14 @@ export class FreshsalesClient implements FreshsalesClientLike {
   }
 
   public async get<T>(path: string, options?: FreshsalesRequestOptions): Promise<T> {
-    return this.request<T>(path, options);
+    return this.request<T>("GET", path, options);
   }
 
-  private async request<T>(path: string, options?: FreshsalesRequestOptions): Promise<T> {
+  public async post<T>(path: string, options?: FreshsalesRequestOptions): Promise<T> {
+    return this.request<T>("POST", path, options);
+  }
+
+  private async request<T>(method: "GET" | "POST", path: string, options?: FreshsalesRequestOptions): Promise<T> {
     // Tool paths must not start with "/" because Freshsales domains can include
     // "/crm/sales"; absolute paths would make new URL() drop that base path.
     const url = new URL(path, `${this.deps.config.freshsalesDomain}/`);
@@ -63,7 +67,20 @@ export class FreshsalesClient implements FreshsalesClientLike {
     while (true) {
       this.deps.usageTracker.recordCall(this.now());
 
-      const response = await this.fetchWithTimeout(url);
+      let response: Response;
+      try {
+        response = await this.fetchWithTimeout(method, url, options?.body);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "FRESHSALES_TIMEOUT" || attempt >= this.deps.config.max429Retries) {
+          throw error;
+        }
+
+        const waitMs = computeBackoffMs(attempt, {}, this.deps.config.maxRetryWaitMs);
+        this.deps.logger.warn("freshsales_timeout_retry", { attempt, wait_ms: waitMs });
+        attempt += 1;
+        await this.sleep(waitMs);
+        continue;
+      }
 
       const rateLimit = parseRateLimitHeaders(response.headers);
 
@@ -115,19 +132,20 @@ export class FreshsalesClient implements FreshsalesClientLike {
   // leaves the fetch promise pending forever, which in turn leaves the
   // /mcp request that awaited it hanging indefinitely with no response
   // ever sent back to the client.
-  private async fetchWithTimeout(url: URL): Promise<Response> {
+  private async fetchWithTimeout(method: "GET" | "POST", url: URL, body?: unknown): Promise<Response> {
     const timeoutMs = this.deps.config.freshsalesRequestTimeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       return await this.fetchImpl(url, {
-        method: "GET",
+        method,
         headers: {
           Authorization: `Token token=${this.deps.config.freshsalesApiKey}`,
           "Content-Type": "application/json",
           Accept: "application/json"
         },
+        body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
         signal: controller.signal
       });
     } catch (error) {
@@ -257,5 +275,7 @@ function normalizeResetHeader(raw: string): string {
 function computeBackoffMs(attempt: number, rateLimit: FreshsalesRateLimitSnapshot, maxRetryWaitMs: number): number {
   const exponential = Math.min(250 * 2 ** attempt, maxRetryWaitMs);
   const resetBased = rateLimit.resetAt ? Math.max(0, new Date(rateLimit.resetAt).getTime() - Date.now()) : 0;
-  return Math.max(exponential, Math.min(resetBased, maxRetryWaitMs));
+  const base = Math.max(exponential, Math.min(resetBased, maxRetryWaitMs));
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(base * 0.25)));
+  return Math.min(base + jitter, maxRetryWaitMs);
 }
