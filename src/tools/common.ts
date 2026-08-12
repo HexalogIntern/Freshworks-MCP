@@ -31,7 +31,7 @@ export interface ToolDefinition<TInput extends ApprovalAwareInput, TResolved, TR
   title: string;
   description: string;
   inputSchema: z.ZodType<TInput>;
-  resolve: (input: TInput, ctx: ToolExecutionContext) => TResolved;
+  resolve: (input: TInput, ctx: ToolExecutionContext) => TResolved | Promise<TResolved>;
   estimateCallCount: (params: TResolved, ctx: ToolExecutionContext) => number;
   execute: (params: TResolved, ctx: ToolExecutionContext) => Promise<TResult>;
   willCallFreshsales: boolean;
@@ -82,7 +82,7 @@ export async function runTool<TInput extends ApprovalAwareInput, TResolved, TRes
       };
     }
 
-    const resolved = definition.resolve(parsedInput, ctx);
+    const resolved = await definition.resolve(parsedInput, ctx);
     const estimatedCallCount = definition.estimateCallCount(resolved, ctx);
     const { requestId, expiresAt } = ctx.approvalStore.create(
       definition.name,

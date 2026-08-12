@@ -4,11 +4,13 @@ import type { AppConfig } from "../src/config.js";
 import { clearFieldSchemaCache } from "../src/freshsales/fieldSchema.js";
 import { scanView, scanViews } from "../src/freshsales/paginatedScan.js";
 import { FreshsalesClient } from "../src/freshsales/client.js";
+import { clearViewCaches, getCachedFieldCoverage, getCachedViews } from "../src/freshsales/viewCache.js";
 import { ApprovalStore } from "../src/state/approvalStore.js";
 import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { getContactTool } from "../src/tools/getContact.js";
 import { contactsSummaryTool } from "../src/tools/contactsSummary.js";
+import { discoverViewsTool } from "../src/tools/discoverViews.js";
 import { listContactsTool } from "../src/tools/listContacts.js";
 import { listDealsTool } from "../src/tools/listDeals.js";
 import { searchContactsTool } from "../src/tools/searchContacts.js";
@@ -25,6 +27,7 @@ const logger: Logger = {
 beforeEach(() => {
   vi.clearAllMocks();
   clearFieldSchemaCache();
+  clearViewCaches();
 });
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -50,6 +53,8 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     dealsScanMaxPages: 10,
     dealsScanMaxViews: 15,
     fieldSchemaCacheTtlMs: 3600000,
+    viewListCacheTtlMs: 3600000,
+    viewFieldCoverageCacheTtlMs: 3600000,
     freshsalesRequestTimeoutMs: 10000,
     mcpRequestTimeoutMs: 25000,
     ...overrides
@@ -471,6 +476,108 @@ describe("error utilities", () => {
 });
 
 describe("contact tools", () => {
+  it("discovers contact views, populates field coverage, and lets a later contact filter use the cache-hit path", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/contacts/filters") {
+        return {
+          filters: [
+            { id: "paid-view", name: "Paid Media Contacts" },
+            { id: "organic-view", name: "Organic Contacts" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/contacts/view/paid-view") {
+        return {
+          contacts: [
+            { id: 1, display_name: "Ada Lovelace", custom_field: { cf_source: "paid_meta" } }
+          ]
+        } as T;
+      }
+
+      if (path === "api/contacts/view/organic-view") {
+        return {
+          contacts: [
+            { id: 2, display_name: "Grace Hopper", custom_field: { cf_source: "organic" } }
+          ]
+        } as T;
+      }
+
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "display_name", label: "Name" },
+            { name: "cf_source", label: "Source" }
+          ]
+        } as T;
+      }
+
+      return { contacts: [] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const proposeDiscovery = await runTool(discoverViewsTool, { entity: "contacts", sample_pages_per_view: 1 }, ctx);
+    expect(proposeDiscovery.payload).toMatchObject({ estimated_call_count: 2 });
+
+    const approveDiscovery = await runTool(discoverViewsTool, { approved: true, request_id: requestIdFrom(proposeDiscovery) }, ctx);
+
+    expect(approveDiscovery.isError).toBe(false);
+    expect(getCachedViews("contacts", ctx.config)?.map(view => view.name)).toEqual(["Paid Media Contacts", "Organic Contacts"]);
+    expect(getCachedFieldCoverage("contacts", ctx.config)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        view: expect.objectContaining({ id: "paid-view" }),
+        populatedFields: expect.arrayContaining([
+          expect.objectContaining({ field: "custom_field.cf_source", values: ["paid_meta"] })
+        ]),
+        strongFilterCandidates: expect.arrayContaining(["source:paid_meta"])
+      })
+    ]));
+
+    get.mockClear();
+    const proposeList = await runTool(listContactsTool, { source: "paid_meta", per_page: 50 }, ctx);
+    const approveList = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(proposeList) }, ctx);
+
+    expect(approveList.isError).toBe(false);
+    expect(approveList.payload).toMatchObject({
+      data: [{ id: 1, cf_source: "paid_meta" }],
+      views_scanned: ["Paid Media Contacts"]
+    });
+    expect(get).toHaveBeenCalledWith("api/contacts/view/paid-view", {
+      query: { page: 1, per_page: 50, include: "owner,sales_account" }
+    });
+    expect(get).not.toHaveBeenCalledWith("api/contacts/filters");
+    expect(get).not.toHaveBeenCalledWith("api/contacts/view/organic-view", expect.anything());
+  });
+
+  it("keeps discover_views approval estimate equal to real sample calls for a mocked 15-view account", async () => {
+    const views = Array.from({ length: 15 }, (_, index) => ({
+      id: `view-${index + 1}`,
+      name: `View ${index + 1}`
+    }));
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/contacts/filters") {
+        return { filters: views } as T;
+      }
+
+      return { contacts: [{ id: path, custom_field: { cf_source: "paid_meta" } }] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(discoverViewsTool, { entity: "contacts", sample_pages_per_view: 1 }, ctx);
+    expect(propose.payload).toMatchObject({ estimated_call_count: 15 });
+
+    const approve = await runTool(discoverViewsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      views_scanned: 15,
+      total_sample_calls: 15
+    });
+    expect(get).toHaveBeenCalledTimes(16);
+    expect(get.mock.calls.filter(([path]) => String(path).startsWith("api/contacts/view/"))).toHaveLength(15);
+  });
+
   it("fetches one contact with owner and custom fields after approval", async () => {
     const get = vi.fn(async <T>() => ({
       contact: {

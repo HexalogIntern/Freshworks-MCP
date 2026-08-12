@@ -1,6 +1,7 @@
 import type { JsonRecord } from "../types.js";
 import type { ToolDefinition } from "./common.js";
 import { contactsSummaryTool } from "./contactsSummary.js";
+import { discoverViewsTool } from "./discoverViews.js";
 import { getContactTool } from "./getContact.js";
 import { getDealTool } from "./getDeal.js";
 import { listContactsTool } from "./listContacts.js";
@@ -11,6 +12,7 @@ import { searchContactsTool } from "./searchContacts.js";
 import { usageStatusTool } from "./usageStatus.js";
 
 export const toolDefinitions: Array<ToolDefinition<any, any, JsonRecord>> = [
+  discoverViewsTool,
   listContactsTool,
   getContactTool,
   listDealsTool,

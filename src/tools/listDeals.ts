@@ -3,6 +3,7 @@ import { z } from "zod";
 import { amountFromDeal, getCollection, linkedAccountFromDeal, linkedContactFromDeal, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal, weightedValueFromDeal } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { cachedViewsForFilter } from "../freshsales/viewCache.js";
 import { listDealViews, resolveDealViewId } from "../freshsales/views.js";
 import { AppError } from "../utils/errors.js";
 import { isIsoDate } from "../utils/time.js";
@@ -50,7 +51,7 @@ export const listDealsTool = defineTool({
   name: "list_deals",
   title: "List Deals",
   description:
-    "Preview or list live Freshsales deals from the configured default deals view, or pass view to target any saved Freshsales view by name or id. Field output, filter_by, and sort_by are validated against Freshsales deal field metadata. Filtered queries scan up to DEALS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for filter_value.",
+    "Preview or list live Freshsales deals from the configured default deals view, or pass view to target any saved Freshsales view by name or id. Field output, filter_by, and sort_by are validated against Freshsales deal field metadata. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered queries can use cached field coverage to avoid broad multi-view discovery. Filtered queries scan up to DEALS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for filter_value.",
   inputSchema: schema,
   resolve(input): ListDealsParams {
     if (input.date_from && !isIsoDate(input.date_from)) {
@@ -96,7 +97,10 @@ export const listDealsTool = defineTool({
     const rawDeals = shouldScanAllViews(params)
       ? await scanViews(ctx, {
         entity: "deals",
-        views: await dealViewsForScan(ctx),
+        views: await dealViewsForScan(ctx, {
+          field: filterField?.name ?? (params.stage ? "stage" : undefined),
+          value: params.filterValue ?? params.stage
+        }),
         maxViews: ctx.config.dealsScanMaxViews,
         perPage: params.perPage,
         maxPages: ctx.config.dealsScanMaxPages,
@@ -168,7 +172,12 @@ function shouldScanAllViews(params: ListDealsParams): boolean {
   return shouldScan(params) && !params.view;
 }
 
-async function dealViewsForScan(ctx: ToolExecutionContext) {
+async function dealViewsForScan(ctx: ToolExecutionContext, filter?: { field?: string; value?: string }) {
+  const cachedViews = filter ? cachedViewsForFilter("deals", ctx.config, filter) : [];
+  if (cachedViews.length > 0) {
+    return cachedViews;
+  }
+
   const views = await listDealViews(ctx);
   return views.length > 0 ? views : [{ id: ctx.config.defaultDealsViewId, name: "Default deals view" }];
 }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { cachedViewsForFilter } from "../freshsales/viewCache.js";
 import { listContactViews, resolveContactViewId } from "../freshsales/views.js";
 import { AppError } from "../utils/errors.js";
 import { isIsoDate } from "../utils/time.js";
@@ -51,7 +52,7 @@ export const listContactsTool = defineTool({
   name: "list_contacts",
   title: "List Contacts",
   description:
-    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Field output, source, filter_by, and sort_by are validated against Freshsales contact field metadata. Filtered queries scan up to CONTACTS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for source and filter_value.",
+    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Field output, source, filter_by, and sort_by are validated against Freshsales contact field metadata. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered source/filter_by queries can go straight to likely matching views instead of broad multi-view scanning. Filtered queries scan up to CONTACTS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for source and filter_value.",
   inputSchema: schema,
   resolve(input): ListContactsParams {
     if (input.date_from && !isIsoDate(input.date_from)) {
@@ -108,7 +109,10 @@ export const listContactsTool = defineTool({
     const rawContacts = shouldScanAllViews(params)
       ? await scanViews(ctx, {
         entity: "contacts",
-        views: await contactViewsForScan(ctx),
+        views: await contactViewsForScan(ctx, {
+          field: params.source ? "source" : filterField?.name,
+          value: params.source ?? params.filterValue
+        }),
         maxViews: ctx.config.contactsScanMaxViews,
         perPage: params.perPage,
         maxPages: ctx.config.contactsScanMaxPages,
@@ -200,7 +204,12 @@ function shouldScanAllViews(params: ListContactsParams): boolean {
   return shouldScan(params) && !params.view;
 }
 
-async function contactViewsForScan(ctx: ToolExecutionContext) {
+async function contactViewsForScan(ctx: ToolExecutionContext, filter?: { field?: string; value?: string }) {
+  const cachedViews = filter ? cachedViewsForFilter("contacts", ctx.config, filter) : [];
+  if (cachedViews.length > 0) {
+    return cachedViews;
+  }
+
   const views = await listContactViews(ctx);
   return views.length > 0 ? views : [{ id: ctx.config.defaultContactsViewId, name: "Default contacts view" }];
 }
