@@ -129,12 +129,14 @@ export function fieldMetadata(fields: FreshsalesFieldDefinition[]): Array<{
   api_field: string;
   ui_label: string | null;
   type: string | null;
+  choices: Record<string, string> | null;
   relation_include: string | null;
 }> {
   return fields.map(field => ({
     api_field: field.name,
     ui_label: field.label ?? null,
     type: field.type ?? null,
+    choices: field.choiceLabelById ?? null,
     relation_include: relationIncludeForField(field.name)
   }));
 }
@@ -197,6 +199,32 @@ export function resolveFilterValueForField(field: FreshsalesFieldDefinition, req
   const trimmed = requested.trim();
   const choiceId = field.choiceIdByLabel?.[normalizeAliasKey(trimmed)];
   return choiceId ?? trimmed;
+}
+
+export function isChoiceBackedField(field: FreshsalesFieldDefinition): boolean {
+  const type = field.type?.toLowerCase();
+  return type === "dropdown" || type === "multi_select_dropdown" || Boolean(field.choiceIdByLabel);
+}
+
+export function resolveChoiceValueForField(field: FreshsalesFieldDefinition, requested: string): string | number {
+  const trimmed = requested.trim();
+  const choiceId = field.choiceIdByLabel?.[normalizeAliasKey(trimmed)];
+  if (choiceId) {
+    return choiceId;
+  }
+
+  if (field.choiceLabelById?.[trimmed]) {
+    return trimmed;
+  }
+
+  const choices = Object.entries(field.choiceLabelById ?? {})
+    .map(([id, label]) => `${label} (${id})`)
+    .slice(0, 20)
+    .join(", ");
+  throw new AppError(
+    "UNKNOWN_DROPDOWN_VALUE",
+    `Unknown value "${requested}" for ${field.name}${field.label ? ` (${field.label})` : ""}. Known values: ${choices || "none cached"}. Run discover_fields with refresh=true to refresh choice metadata.`
+  );
 }
 
 export function choiceDisplayValue(field: FreshsalesFieldDefinition, rawValue: unknown): unknown {

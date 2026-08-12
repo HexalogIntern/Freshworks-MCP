@@ -6,6 +6,9 @@ Read-only MCP server for live Freshsales CRM access from Claude. Every tool uses
 
 - `discover_views(entity, sample_pages_per_view)`
 - `list_contacts(view, source, filter_by, filter_value, match_mode, owner, date_from, date_to, page, per_page)`
+- `query_records(entity, filters, filter_groups, query, include_notes, include_linked, fields, page, per_page)`
+- `run_report(entity, filters, group_by, metrics, sort_by, limit)`
+- `export_records(entity, filters, fields, cursor, per_page, detect_duplicates)`
 - `get_contact(id)`
 - `list_deals(stage, view, filter_by, filter_value, match_mode, owner, date_from, date_to, page, per_page)`
 - `get_deal(id)`
