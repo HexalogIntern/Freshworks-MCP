@@ -36,6 +36,8 @@ const config: AppConfig = {
   dealsScanMaxPages: 10,
   dealsScanMaxViews: 15,
   fieldSchemaCacheTtlMs: 3600000,
+  viewListCacheTtlMs: 3600000,
+  viewFieldCoverageCacheTtlMs: 3600000,
   freshsalesRequestTimeoutMs: 10000,
   mcpRequestTimeoutMs: 25000
 };

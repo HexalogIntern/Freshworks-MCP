@@ -1,5 +1,6 @@
 import { AppError } from "../utils/errors.js";
 import type { ToolExecutionContext } from "../tools/common.js";
+import { getCachedViews, setCachedViews } from "./viewCache.js";
 
 export interface FreshsalesView {
   id: string;
@@ -27,13 +28,21 @@ export async function resolveDealViewId(ctx: ToolExecutionContext, view: string)
 }
 
 async function listViews(ctx: ToolExecutionContext, entity: "contacts" | "deals"): Promise<FreshsalesView[]> {
+  const cached = getCachedViews(entity, ctx.config);
+  if (cached) {
+    return cached;
+  }
+
   const payload = await ctx.freshsales.get<FilterPayload>(`api/${entity}/filters`);
-  return (payload.filters ?? [])
+  const views = (payload.filters ?? [])
     .filter(candidate => candidate.id !== undefined && candidate.id !== null)
     .map(candidate => ({
       id: String(candidate.id),
       name: candidate.name?.trim() || String(candidate.id)
     }));
+  setCachedViews(entity, views, ctx.config);
+
+  return views;
 }
 
 function resolveViewId(views: FreshsalesView[], view: string, entityLabel: "contact" | "deal"): string {
