@@ -159,6 +159,37 @@ export function fieldValueFor(record: Record<string, unknown>, field: Freshsales
   return resolveFieldValue(record, asRecord(record.custom_field), field.name);
 }
 
+export function relationDisplayValue(record: Record<string, unknown>, field: FreshsalesFieldDefinition): unknown {
+  const includeKey = relationIncludeForField(field.name);
+  if (!includeKey) {
+    return fieldValueFor(record, field);
+  }
+
+  const nested = record[includeKey];
+  if (Array.isArray(nested)) {
+    const names = nested
+      .map(item => stringValue(asRecord(item).name))
+      .filter((name): name is string => Boolean(name));
+    if (names.length > 0) {
+      return names.join(", ");
+    }
+  }
+
+  const nestedName = stringValue(asRecord(nested).name);
+  return nestedName ?? fieldValueFor(record, field);
+}
+
+export function fieldComparableValues(record: Record<string, unknown>, field: FreshsalesFieldDefinition): unknown[] {
+  const values = [relationDisplayValue(record, field), fieldValueFor(record, field)];
+  return values.filter((value, index) => {
+    if (value === undefined || value === null || String(value).trim() === "") {
+      return false;
+    }
+
+    return values.findIndex(candidate => String(candidate) === String(value)) === index;
+  });
+}
+
 function resolveFieldValue(
   record: Record<string, unknown>,
   customField: Record<string, unknown>,

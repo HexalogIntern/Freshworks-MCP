@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { contactStatusFromRecord } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
-import { fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { AppError } from "../utils/errors.js";
 import { listContactViews } from "../freshsales/views.js";
 import { normalizeMonth } from "../utils/time.js";
@@ -46,6 +46,7 @@ export const contactsSummaryTool = defineTool({
     const fieldSchema = normalizeGroupInput(params.groupBy) === "month" ? [] : await fetchFieldSchema(ctx, "contacts");
     const groupResolution = resolveContactGroup(params.groupBy, fieldSchema);
     const sourceField = groupResolution.groupBy === "source" ? validateFieldName(fieldSchema, "source") : undefined;
+    const include = mergeIncludes("owner,sales_account", relationIncludeForField(groupResolution.apiField?.name ?? ""));
     const scan = groupResolution.groupBy === "source"
       ? await scanViews(ctx, {
         entity: "contacts",
@@ -53,7 +54,7 @@ export const contactsSummaryTool = defineTool({
         maxViews: ctx.config.contactsScanMaxViews,
         perPage,
         maxPages: ctx.config.contactsScanMaxPages,
-        include: "owner,sales_account",
+        include,
         annotateMatchedView: true,
         matches: () => true
       })
@@ -62,7 +63,7 @@ export const contactsSummaryTool = defineTool({
         viewId: ctx.config.defaultContactsViewId,
         perPage,
         maxPages: ctx.config.contactsScanMaxPages,
-        include: "owner,sales_account",
+        include,
         matches: () => true
       });
     const groups = new Map<string, number>();

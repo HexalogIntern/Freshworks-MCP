@@ -891,6 +891,118 @@ describe("contact tools", () => {
     });
   });
 
+  it("filters contact status by included display name without hydrate_relations", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string; page?: number } }) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "display_name", label: "Name" },
+            { name: "contact_status_id", label: "Status" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/contacts/filters") {
+        return { filters: [{ id: "bhavesh-view", name: "Bhavesh View" }] } as T;
+      }
+
+      expect(options?.query?.include).toContain("contact_status");
+      return {
+        contacts: [
+          {
+            id: 1,
+            display_name: "Bhavesh",
+            contact_status_id: 10,
+            contact_status: { id: 10, name: "CC Qualified" }
+          },
+          {
+            id: 2,
+            display_name: "Ada",
+            contact_status_id: 20,
+            contact_status: { id: 20, name: "New" }
+          }
+        ]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(listContactsTool, {
+      view: "Bhavesh View",
+      filter_by: "status",
+      filter_value: "CC Qualified",
+      per_page: 50
+    }, ctx);
+
+    expect(propose.payload).toMatchObject({
+      estimated_call_count: 12,
+      estimated_call_count_typical: 12,
+      estimated_call_count_worst_case: 12
+    });
+
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      data: [{
+        id: 1,
+        display_name: "Bhavesh",
+        status: "CC Qualified",
+        contact_status_id: 10
+      }],
+      filters_applied: {
+        filter_api_field: "contact_status_id",
+        filter_ui_label: "Status",
+        hydrate_relations: false
+      }
+    });
+    expect(get.mock.calls.some(([path]) => String(path).startsWith("api/contacts/1"))).toBe(false);
+  });
+
+  it("does not make extra contact detail calls for hydrate_relations when requested relation includes are already fetched", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string } }) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "contact_status_id", label: "Status" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/contacts/filters") {
+        return { filters: [{ id: "status-view", name: "Status View" }] } as T;
+      }
+
+      expect(options?.query?.include).toContain("contact_status");
+      return {
+        contacts: [{
+          id: 1,
+          contact_status_id: 10,
+          contact_status: { id: 10, name: "CC Qualified" }
+        }]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(listContactsTool, {
+      view: "Status View",
+      filter_by: "status",
+      filter_value: "CC Qualified",
+      hydrate_relations: true,
+      per_page: 10
+    }, ctx);
+    expect(propose.payload).toMatchObject({
+      estimated_call_count: 12,
+      estimated_call_count_worst_case: 112
+    });
+
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(get.mock.calls.filter(([path]) => String(path).startsWith("api/contacts/1"))).toHaveLength(0);
+  });
+
   it("discovers field labels and reuses the warmed alias cache after a cold memory start", async () => {
     const get = vi.fn(async <T>(path: string) => {
       if (path === "api/settings/contacts/fields") {
@@ -1173,6 +1285,43 @@ describe("contacts summary", () => {
       groups: [
         { key: "2026-08", count: 50 },
         { key: "2026-09", count: 1 }
+      ]
+    });
+  });
+
+  it("groups contacts by included status names instead of Unknown", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string } }) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "contact_status_id", label: "Status" }
+          ]
+        } as T;
+      }
+
+      expect(options?.query?.include).toContain("contact_status");
+      return {
+        contacts: [
+          { id: 1, contact_status_id: 10, contact_status: { id: 10, name: "CC Qualified" } },
+          { id: 2, contact_status_id: 10, contact_status: { id: 10, name: "CC Qualified" } },
+          { id: 3, contact_status_id: 20, contact_status: { id: 20, name: "New" } }
+        ]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(contactsSummaryTool, { group_by: "status" }, ctx);
+    const approve = await runTool(contactsSummaryTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      group_by: "status",
+      group_api_field: "contact_status_id",
+      group_ui_label: "Status",
+      groups: [
+        { key: "CC Qualified", count: 2 },
+        { key: "New", count: 1 }
       ]
     });
   });

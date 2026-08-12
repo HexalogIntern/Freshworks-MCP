@@ -96,7 +96,8 @@ export function contactStatusFromRecord(record: Record<string, unknown>): string
     stringValue(record.stage_name) ??
     stringValue(record.status) ??
     stringValue(record.stage) ??
-    stringValue(record.lifecycle_stage_id)
+    stringValue(record.lifecycle_stage_id) ??
+    stringValue(record.contact_status_id)
   );
 }
 
