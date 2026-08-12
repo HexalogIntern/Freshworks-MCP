@@ -31,6 +31,8 @@ const envSchema = z.object({
   DEALS_SCAN_MAX_PAGES: z.coerce.number().int().min(1).max(20).default(10),
   DEALS_SCAN_MAX_VIEWS: z.coerce.number().int().min(1).max(50).default(15),
   FIELD_SCHEMA_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600000),
+  VIEW_LIST_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600000),
+  VIEW_FIELD_COVERAGE_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600000),
   FRESHSALES_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
   MCP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(25000)
 });
@@ -68,6 +70,8 @@ export interface AppConfig {
   dealsScanMaxPages: number;
   dealsScanMaxViews: number;
   fieldSchemaCacheTtlMs: number;
+  viewListCacheTtlMs: number;
+  viewFieldCoverageCacheTtlMs: number;
   freshsalesRequestTimeoutMs: number;
   mcpRequestTimeoutMs: number;
 }
@@ -104,6 +108,8 @@ export function getConfig(): AppConfig {
     dealsScanMaxPages: env.DEALS_SCAN_MAX_PAGES,
     dealsScanMaxViews: env.DEALS_SCAN_MAX_VIEWS,
     fieldSchemaCacheTtlMs: env.FIELD_SCHEMA_CACHE_TTL_MS,
+    viewListCacheTtlMs: env.VIEW_LIST_CACHE_TTL_MS,
+    viewFieldCoverageCacheTtlMs: env.VIEW_FIELD_COVERAGE_CACHE_TTL_MS,
     freshsalesRequestTimeoutMs: env.FRESHSALES_REQUEST_TIMEOUT_MS,
     mcpRequestTimeoutMs: env.MCP_REQUEST_TIMEOUT_MS
   };
