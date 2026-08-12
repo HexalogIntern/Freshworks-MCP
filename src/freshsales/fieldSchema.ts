@@ -1,3 +1,8 @@
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { ToolExecutionContext } from "../tools/common.js";
 import { AppError } from "../utils/errors.js";
 
@@ -12,6 +17,13 @@ export interface FreshsalesFieldDefinition {
   choices?: unknown[];
 }
 
+export interface FieldAliasResolution {
+  requested: string;
+  apiField: FreshsalesFieldDefinition;
+  resolvedInput: string;
+  matchedBy: "api_field" | "ui_label";
+}
+
 interface FieldSchemaPayload {
   fields?: unknown[];
 }
@@ -19,6 +31,10 @@ interface FieldSchemaPayload {
 interface FieldSchemaCacheEntry {
   expiresAt: number;
   fields: FreshsalesFieldDefinition[];
+}
+
+interface PersistedFieldSchemaCache {
+  entries?: Record<string, FieldSchemaCacheEntry>;
 }
 
 const cache = new Map<FieldSchemaEntity, FieldSchemaCacheEntry>();
@@ -29,6 +45,11 @@ export function isFieldSchemaCacheMiss(ctx: ToolExecutionContext, entity: FieldS
 }
 
 export function clearFieldSchemaCache(): void {
+  cache.clear();
+  rmSync(fieldSchemaCachePath(), { force: true });
+}
+
+export function clearFieldSchemaMemoryCache(): void {
   cache.clear();
 }
 
@@ -42,15 +63,23 @@ export async function fetchFieldSchema(
     return cached.fields;
   }
 
+  const persisted = options.forceRefresh ? null : await readPersistedFieldSchema(ctx, entity);
+  if (persisted && Date.now() < persisted.expiresAt && ctx.config.fieldSchemaCacheTtlMs !== 0) {
+    cache.set(entity, persisted);
+    return persisted.fields;
+  }
+
   const payload = await ctx.freshsales.get<FieldSchemaPayload>(`api/settings/${entity}/fields`);
   const fields = Array.isArray(payload.fields)
     ? payload.fields.map(normalizeFieldDefinition).filter((field): field is FreshsalesFieldDefinition => field !== null)
     : [];
 
-  cache.set(entity, {
+  const entry = {
     fields,
     expiresAt: Date.now() + ctx.config.fieldSchemaCacheTtlMs
-  });
+  };
+  cache.set(entity, entry);
+  await writePersistedFieldSchema(ctx, entity, entry);
 
   return fields;
 }
@@ -70,18 +99,60 @@ export function dynamicRecordFromSchema(
 }
 
 export function validateFieldName(fields: FreshsalesFieldDefinition[], requested: string): FreshsalesFieldDefinition {
-  const normalized = normalizeName(requested);
-  const matched = fields.find(field => {
-    return normalizeName(field.name) === normalized || normalizeName(field.label) === normalized;
-  });
+  return resolveFieldAlias(fields, requested).apiField;
+}
+
+export function resolveFieldAlias(fields: FreshsalesFieldDefinition[], requested: string): FieldAliasResolution {
+  const trimmed = requested.trim();
+  const aliasMap = buildFieldAliasMap(fields);
+  const resolvedInput = aliasMap.get(normalizeAliasKey(trimmed)) ?? trimmed;
+  const normalized = normalizeName(resolvedInput);
+  const matched = fields.find(field => normalizeName(field.name) === normalized);
 
   if (matched) {
-    return matched;
+    return {
+      requested,
+      apiField: matched,
+      resolvedInput: matched.name,
+      matchedBy: normalizeName(trimmed) === normalizeName(matched.name) ? "api_field" : "ui_label"
+    };
   }
 
   const matches = closestFieldMatches(fields, requested);
   const suffix = matches.length > 0 ? ` Did you mean: ${matches.join(", ")}?` : "";
   throw new AppError("UNKNOWN_FIELD", `Unknown Freshsales field: ${requested}.${suffix}`);
+}
+
+export function fieldMetadata(fields: FreshsalesFieldDefinition[]): Array<{
+  api_field: string;
+  ui_label: string | null;
+  type: string | null;
+  relation_include: string | null;
+}> {
+  return fields.map(field => ({
+    api_field: field.name,
+    ui_label: field.label ?? null,
+    type: field.type ?? null,
+    relation_include: relationIncludeForField(field.name)
+  }));
+}
+
+export function relationIncludeForField(fieldName: string): string | null {
+  return relationFieldIncludes.get(fieldName) ?? null;
+}
+
+export function mergeIncludes(...includeGroups: Array<string | null | undefined>): string {
+  const includes = new Set<string>();
+  for (const group of includeGroups) {
+    for (const include of String(group ?? "").split(",")) {
+      const trimmed = include.trim();
+      if (trimmed) {
+        includes.add(trimmed);
+      }
+    }
+  }
+
+  return Array.from(includes).join(",");
 }
 
 export function fieldValueFor(record: Record<string, unknown>, field: FreshsalesFieldDefinition): unknown {
@@ -129,6 +200,22 @@ function closestFieldMatches(fields: FreshsalesFieldDefinition[], requested: str
     .slice(0, 5);
 }
 
+function buildFieldAliasMap(fields: FreshsalesFieldDefinition[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const field of fields) {
+    aliases.set(normalizeAliasKey(field.name), field.name);
+    if (field.label) {
+      aliases.set(normalizeAliasKey(field.label), field.name);
+    }
+  }
+
+  return aliases;
+}
+
+function normalizeAliasKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function normalizeName(value: unknown): string {
   return String(value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
@@ -140,3 +227,61 @@ function asRecord(value: unknown): Record<string, unknown> {
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
+
+async function readPersistedFieldSchema(
+  ctx: ToolExecutionContext,
+  entity: FieldSchemaEntity
+): Promise<FieldSchemaCacheEntry | null> {
+  try {
+    const parsed = JSON.parse(await readFile(fieldSchemaCachePath(), "utf8")) as PersistedFieldSchemaCache;
+    const entry = parsed.entries?.[persistedCacheKey(ctx, entity)];
+    return entry && Array.isArray(entry.fields) ? entry : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writePersistedFieldSchema(
+  ctx: ToolExecutionContext,
+  entity: FieldSchemaEntity,
+  entry: FieldSchemaCacheEntry
+): Promise<void> {
+  try {
+    await mkdir(join(tmpdir(), "freshsales-mcp"), { recursive: true });
+    const current = await readPersistedFieldSchemaFile();
+    current.entries = current.entries ?? {};
+    current.entries[persistedCacheKey(ctx, entity)] = entry;
+    await writeFile(fieldSchemaCachePath(), JSON.stringify(current), "utf8");
+  } catch {
+    ctx.logger.warn("field_schema_cache_persist_failed", { entity });
+  }
+}
+
+async function readPersistedFieldSchemaFile(): Promise<PersistedFieldSchemaCache> {
+  try {
+    return JSON.parse(await readFile(fieldSchemaCachePath(), "utf8")) as PersistedFieldSchemaCache;
+  } catch {
+    return {};
+  }
+}
+
+function fieldSchemaCachePath(): string {
+  return join(tmpdir(), "freshsales-mcp", "field-schema-cache.json");
+}
+
+function persistedCacheKey(ctx: ToolExecutionContext, entity: FieldSchemaEntity): string {
+  return `${ctx.config.freshsalesDomain}|${entity}`;
+}
+
+const relationFieldIncludes = new Map<string, string>([
+  ["contact_status_id", "contact_status"],
+  ["lifecycle_stage_id", "lifecycle_stage"],
+  ["sales_accounts", "sales_accounts"],
+  ["sales_account_id", "sales_account"],
+  ["sales_account", "sales_account"],
+  ["owner_id", "owner"],
+  ["owner", "owner"],
+  ["deal_stage_id", "deal_stage"],
+  ["deal_stage", "deal_stage"],
+  ["contacts", "contacts"]
+]);

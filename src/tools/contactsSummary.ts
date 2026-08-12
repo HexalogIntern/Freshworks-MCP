@@ -2,29 +2,28 @@ import { z } from "zod";
 
 import { contactStatusFromRecord } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
-import { fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName } from "../freshsales/fieldSchema.js";
+import { fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { AppError } from "../utils/errors.js";
 import { listContactViews } from "../freshsales/views.js";
 import { normalizeMonth } from "../utils/time.js";
 import { approvalFields, defineTool } from "./common.js";
 
-const groupBySchema = z.enum(["status", "month", "source"]);
-
 const schema = z
   .object({
     ...approvalFields,
-    group_by: groupBySchema.optional()
+    group_by: z.string().trim().min(1).max(100).optional()
   })
   .strict();
 
 interface ContactsSummaryParams {
-  groupBy: "status" | "month" | "source";
+  groupBy: string;
 }
 
 export const contactsSummaryTool = defineTool({
   name: "contacts_summary",
   title: "Contacts Summary",
   description:
-    "Preview or aggregate live Freshsales contact data by status, month, or source. Execution scans the configured contacts view page by page up to CONTACTS_SCAN_MAX_PAGES and returns scanned_records plus truncated when the scan cap is reached.",
+    "Preview or aggregate live Freshsales contact data by status, month, or source. group_by accepts supported raw API field names or UI display labels, case-insensitively. Execution scans the configured contacts view page by page up to CONTACTS_SCAN_MAX_PAGES and returns scanned_records plus truncated when the scan cap is reached.",
   inputSchema: schema,
   resolve(input): ContactsSummaryParams {
     if (!input.group_by) {
@@ -36,16 +35,18 @@ export const contactsSummaryTool = defineTool({
     };
   },
   estimateCallCount(params, ctx) {
-    const scanCalls = params.groupBy === "source"
+    const groupBy = normalizeGroupInput(params.groupBy);
+    const scanCalls = groupBy === "source"
       ? ctx.config.contactsScanMaxPages * ctx.config.contactsScanMaxViews + 1
       : ctx.config.contactsScanMaxPages;
-    return scanCalls + (params.groupBy === "source" && isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0);
+    return scanCalls + (groupBy !== "month" && isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0);
   },
   async execute(params, ctx) {
     const perPage = 50;
-    const fieldSchema = params.groupBy === "source" ? await fetchFieldSchema(ctx, "contacts") : [];
-    const sourceField = params.groupBy === "source" ? validateFieldName(fieldSchema, "source") : undefined;
-    const scan = params.groupBy === "source"
+    const fieldSchema = normalizeGroupInput(params.groupBy) === "month" ? [] : await fetchFieldSchema(ctx, "contacts");
+    const groupResolution = resolveContactGroup(params.groupBy, fieldSchema);
+    const sourceField = groupResolution.groupBy === "source" ? validateFieldName(fieldSchema, "source") : undefined;
+    const scan = groupResolution.groupBy === "source"
       ? await scanViews(ctx, {
         entity: "contacts",
         views: await contactViewsForScan(ctx),
@@ -67,12 +68,14 @@ export const contactsSummaryTool = defineTool({
     const groups = new Map<string, number>();
 
     for (const contact of scan.records) {
-      const key = groupKey(params.groupBy, contact, sourceField);
+      const key = groupKey(groupResolution.groupBy, contact, sourceField);
       groups.set(key, (groups.get(key) ?? 0) + 1);
     }
 
     return {
       group_by: params.groupBy,
+      group_api_field: groupResolution.apiField?.name ?? null,
+      group_ui_label: groupResolution.apiField?.label ?? null,
       scanned_records: scan.scannedRecords,
       views_scanned: "viewsScanned" in scan ? scan.viewsScanned : [],
       views_skipped_due_to_cap: "viewsSkippedDueToCap" in scan ? scan.viewsSkippedDueToCap : [],
@@ -87,7 +90,7 @@ export const contactsSummaryTool = defineTool({
 });
 
 function groupKey(
-  groupBy: ContactsSummaryParams["groupBy"],
+  groupBy: "status" | "month" | "source",
   contact: Record<string, unknown>,
   sourceField?: ReturnType<typeof validateFieldName>
 ): string {
@@ -108,6 +111,43 @@ function groupKey(
 
   return contactStatusFromRecord(contact) ?? "Unknown";
 }
+
+function resolveContactGroup(groupBy: string, fields: FreshsalesFieldDefinition[]): {
+  groupBy: "status" | "month" | "source";
+  apiField?: FreshsalesFieldDefinition;
+} {
+  const normalized = normalizeGroupInput(groupBy);
+  const builtin = contactGroupAliases.get(normalized);
+  if (builtin) {
+    const apiField = builtin === "source"
+      ? fields.find(field => field.name === "source" || field.label?.trim().toLowerCase() === "source")
+      : fields.find(field => field.name === "contact_status_id" || field.label?.trim().toLowerCase() === "status");
+    return { groupBy: builtin, apiField };
+  }
+
+  const resolved = resolveFieldAlias(fields, groupBy).apiField;
+  if (resolved.name === "source") {
+    return { groupBy: "source", apiField: resolved };
+  }
+
+  if (resolved.name === "contact_status_id") {
+    return { groupBy: "status", apiField: resolved };
+  }
+
+  throw new AppError("UNSUPPORTED_GROUP_BY", `Unsupported contacts_summary group_by field: ${groupBy}. Supported groups are status, month, and source.`);
+}
+
+function normalizeGroupInput(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+const contactGroupAliases = new Map<string, "status" | "month" | "source">([
+  ["status", "status"],
+  ["contactstatus", "status"],
+  ["contactstatusid", "status"],
+  ["month", "month"],
+  ["source", "source"]
+]);
 
 async function contactViewsForScan(ctx: Parameters<typeof listContactViews>[0]) {
   const views = await listContactViews(ctx);

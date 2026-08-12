@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
-import { clearFieldSchemaCache } from "../src/freshsales/fieldSchema.js";
+import { clearFieldSchemaCache, clearFieldSchemaMemoryCache } from "../src/freshsales/fieldSchema.js";
 import { scanView, scanViews } from "../src/freshsales/paginatedScan.js";
 import { FreshsalesClient } from "../src/freshsales/client.js";
 import { clearViewCaches, getCachedFieldCoverage, getCachedViews } from "../src/freshsales/viewCache.js";
@@ -10,6 +10,7 @@ import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { getContactTool } from "../src/tools/getContact.js";
 import { contactsSummaryTool } from "../src/tools/contactsSummary.js";
+import { discoverFieldsTool } from "../src/tools/discoverFields.js";
 import { discoverViewsTool } from "../src/tools/discoverViews.js";
 import { listContactsTool } from "../src/tools/listContacts.js";
 import { listDealsTool } from "../src/tools/listDeals.js";
@@ -518,7 +519,7 @@ describe("contact tools", () => {
     const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
 
     const proposeDiscovery = await runTool(discoverViewsTool, { entity: "contacts", sample_pages_per_view: 1 }, ctx);
-    expect(proposeDiscovery.payload).toMatchObject({ estimated_call_count: 2 });
+    expect(proposeDiscovery.payload).toMatchObject({ estimated_call_count: 3 });
 
     const approveDiscovery = await runTool(discoverViewsTool, { approved: true, request_id: requestIdFrom(proposeDiscovery) }, ctx);
 
@@ -536,7 +537,7 @@ describe("contact tools", () => {
 
     get.mockClear();
     const proposeList = await runTool(listContactsTool, { source: "paid_meta", per_page: 50 }, ctx);
-    expect(proposeList.payload).toMatchObject({ estimated_call_count: 11 });
+    expect(proposeList.payload).toMatchObject({ estimated_call_count: 10 });
 
     const approveList = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(proposeList) }, ctx);
 
@@ -567,7 +568,7 @@ describe("contact tools", () => {
     const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
 
     const propose = await runTool(discoverViewsTool, { entity: "contacts", sample_pages_per_view: 1 }, ctx);
-    expect(propose.payload).toMatchObject({ estimated_call_count: 15 });
+    expect(propose.payload).toMatchObject({ estimated_call_count: 16 });
 
     const approve = await runTool(discoverViewsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
@@ -576,7 +577,7 @@ describe("contact tools", () => {
       views_scanned: 15,
       total_sample_calls: 15
     });
-    expect(get).toHaveBeenCalledTimes(16);
+    expect(get).toHaveBeenCalledTimes(17);
     expect(get.mock.calls.filter(([path]) => String(path).startsWith("api/contacts/view/"))).toHaveLength(15);
   });
 
@@ -805,6 +806,115 @@ describe("contact tools", () => {
     expect(get).toHaveBeenCalledWith("api/contacts/view/contact-view", {
       query: { page: 1, per_page: 10, include: "owner,sales_account", sort: undefined, sort_type: undefined }
     });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats contact UI labels and API field names as identical filter inputs", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "cf_pain_statement", label: "Remarks" }
+          ]
+        } as T;
+      }
+
+      return {
+        contacts: [
+          { id: 1, custom_field: { cf_pain_statement: "Needs onboarding" } },
+          { id: 2, custom_field: { cf_pain_statement: "No current pain" } }
+        ]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const byLabel = await runTool(listContactsTool, { filter_by: "remarks", filter_value: "Needs onboarding", per_page: 10 }, ctx);
+    const byLabelApproved = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(byLabel) }, ctx);
+    const byApi = await runTool(listContactsTool, { filter_by: "cf_pain_statement", filter_value: "Needs onboarding", per_page: 10 }, ctx);
+    const byApiApproved = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(byApi) }, ctx);
+
+    expect(byLabelApproved.isError).toBe(false);
+    expect(byLabelApproved.payload).toMatchObject({
+      data: [{ id: 1, cf_pain_statement: "Needs onboarding" }],
+      filters_applied: {
+        filter_by: "remarks",
+        filter_api_field: "cf_pain_statement",
+        filter_ui_label: "Remarks"
+      }
+    });
+    expect(byApiApproved.payload).toMatchObject({
+      data: [{ id: 1, cf_pain_statement: "Needs onboarding" }],
+      filters_applied: {
+        filter_api_field: "cf_pain_statement",
+        filter_ui_label: "Remarks"
+      }
+    });
+  });
+
+  it("auto-adds targeted contact relation includes when filtering by a UI label like status", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string } }) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "contact_status_id", label: "Status" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/contacts/filters") {
+        return { filters: [] } as T;
+      }
+
+      expect(options?.query?.include).toContain("contact_status");
+      return {
+        contacts: [
+          { id: 1, contact_status_id: 10 },
+          { id: 2, contact_status_id: 20 }
+        ]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(listContactsTool, { filter_by: "status", filter_value: "10", per_page: 10 }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      data: [{ id: 1, contact_status_id: 10 }],
+      filters_applied: {
+        filter_by: "status",
+        filter_api_field: "contact_status_id",
+        filter_ui_label: "Status"
+      }
+    });
+  });
+
+  it("discovers field labels and reuses the warmed alias cache after a cold memory start", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return { fields: [{ name: "cf_pain_statement", label: "Remarks", type: "custom_text" }] } as T;
+      }
+
+      return { fields: [] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const firstPropose = await runTool(discoverFieldsTool, { entity: "contacts" }, ctx);
+    expect(firstPropose.payload).toMatchObject({ estimated_call_count: 1 });
+    const firstApprove = await runTool(discoverFieldsTool, { approved: true, request_id: requestIdFrom(firstPropose) }, ctx);
+    clearFieldSchemaMemoryCache();
+    const secondPropose = await runTool(discoverFieldsTool, { entity: "contacts" }, ctx);
+    expect(secondPropose.payload).toMatchObject({ estimated_call_count: 1 });
+    const secondApprove = await runTool(discoverFieldsTool, { approved: true, request_id: requestIdFrom(secondPropose) }, ctx);
+
+    expect(firstApprove.payload).toMatchObject({
+      contacts: {
+        fields: [{ api_field: "cf_pain_statement", ui_label: "Remarks", type: "custom_text" }]
+      }
+    });
+    expect(secondApprove.payload).toMatchObject(firstApprove.payload);
     expect(get).toHaveBeenCalledTimes(1);
   });
 

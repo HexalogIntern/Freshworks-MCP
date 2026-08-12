@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
-import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { cachedViewsForFilter } from "../freshsales/viewCache.js";
 import { listContactViews, resolveContactViewId } from "../freshsales/views.js";
 import { AppError } from "../utils/errors.js";
@@ -52,7 +52,7 @@ export const listContactsTool = defineTool({
   name: "list_contacts",
   title: "List Contacts",
   description:
-    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Field output, source, filter_by, and sort_by are validated against Freshsales contact field metadata. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered source/filter_by queries can go straight to likely matching views instead of broad multi-view scanning. Filtered queries scan up to CONTACTS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for source and filter_value.",
+    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Field output, source, filter_by, and sort_by accept either raw API field names or UI display labels, case-insensitively, and are validated against Freshsales contact field metadata. Relation-backed fields may add targeted include hydration cost. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered source/filter_by queries can go straight to likely matching views instead of broad multi-view scanning. Filtered queries scan up to CONTACTS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for source and filter_value.",
   inputSchema: schema,
   resolve(input): ListContactsParams {
     if (input.date_from && !isIsoDate(input.date_from)) {
@@ -103,16 +103,22 @@ export const listContactsTool = defineTool({
     }
 
     const fieldSchema = await fetchFieldSchema(ctx, "contacts");
-    const filterField = params.filterBy ? validateFieldName(fieldSchema, params.filterBy) : undefined;
+    const filterResolution = params.filterBy ? resolveFieldAlias(fieldSchema, params.filterBy) : undefined;
+    const filterField = filterResolution?.apiField;
     const sourceField = params.source ? validateFieldName(fieldSchema, "source") : undefined;
-    const sortField = params.sortBy ? validateFieldName(fieldSchema, params.sortBy) : undefined;
+    const sortResolution = params.sortBy ? resolveFieldAlias(fieldSchema, params.sortBy) : undefined;
+    const sortField = sortResolution?.apiField;
     const viewId = params.view
       ? await resolveContactViewId(ctx, params.view)
       : ctx.config.defaultContactsViewId;
 
     const nativeSort = sortField && nativeContactSortFields.has(sortField.name);
 
-    const include = "owner,sales_account";
+    const include = mergeIncludes(
+      "owner,sales_account",
+      relationIncludeForField(filterField?.name ?? ""),
+      relationIncludeForField(sortField?.name ?? "")
+    );
     const rawContacts = shouldScanAllViews(params)
       ? await scanViews(ctx, {
         entity: "contacts",
@@ -186,8 +192,12 @@ export const listContactsTool = defineTool({
         view: params.view ?? null,
         source: params.source ?? null,
         filter_by: params.filterBy ?? null,
+        filter_api_field: filterResolution?.apiField.name ?? null,
+        filter_ui_label: filterResolution?.apiField.label ?? null,
         filter_value: params.filterValue ?? null,
         sort_by: params.sortBy ?? null,
+        sort_api_field: sortResolution?.apiField.name ?? null,
+        sort_ui_label: sortResolution?.apiField.label ?? null,
         sort_order: params.sortBy ? params.sortOrder : null,
         sort_scope: params.sortBy ? (nativeSort ? "freshsales" : "page") : null,
         hydrate_relations: params.hydrateRelations,

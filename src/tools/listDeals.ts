@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { amountFromDeal, getCollection, linkedAccountFromDeal, linkedContactFromDeal, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal, weightedValueFromDeal } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
-import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationIncludeForField, resolveFieldAlias, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { cachedViewsForFilter } from "../freshsales/viewCache.js";
 import { listDealViews, resolveDealViewId } from "../freshsales/views.js";
 import { AppError } from "../utils/errors.js";
@@ -51,7 +51,7 @@ export const listDealsTool = defineTool({
   name: "list_deals",
   title: "List Deals",
   description:
-    "Preview or list live Freshsales deals from the configured default deals view, or pass view to target any saved Freshsales view by name or id. Field output, filter_by, and sort_by are validated against Freshsales deal field metadata. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered queries can use cached field coverage to avoid broad multi-view discovery. Filtered queries scan up to DEALS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for filter_value.",
+    "Preview or list live Freshsales deals from the configured default deals view, or pass view to target any saved Freshsales view by name or id. Field output, filter_by, and sort_by accept either raw API field names or UI display labels, case-insensitively, and are validated against Freshsales deal field metadata. Relation-backed fields may add targeted include hydration cost. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered queries can use cached field coverage to avoid broad multi-view discovery. Filtered queries scan up to DEALS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for filter_value.",
   inputSchema: schema,
   resolve(input): ListDealsParams {
     if (input.date_from && !isIsoDate(input.date_from)) {
@@ -93,14 +93,20 @@ export const listDealsTool = defineTool({
   },
   async execute(params, ctx) {
     const fieldSchema = await fetchFieldSchema(ctx, "deals");
-    const filterField = params.filterBy ? validateFieldName(fieldSchema, params.filterBy) : undefined;
-    const sortField = params.sortBy ? validateFieldName(fieldSchema, params.sortBy) : undefined;
+    const filterResolution = params.filterBy ? resolveFieldAlias(fieldSchema, params.filterBy) : undefined;
+    const filterField = filterResolution?.apiField;
+    const sortResolution = params.sortBy ? resolveFieldAlias(fieldSchema, params.sortBy) : undefined;
+    const sortField = sortResolution?.apiField;
     const viewId = params.view
       ? await resolveDealViewId(ctx, params.view)
       : ctx.config.defaultDealsViewId;
     const nativeSort = sortField && nativeDealSortFields.has(sortField.name);
 
-    const include = "owner,sales_account,contacts,deal_stage";
+    const include = mergeIncludes(
+      "owner,sales_account,contacts,deal_stage",
+      relationIncludeForField(filterField?.name ?? ""),
+      relationIncludeForField(sortField?.name ?? "")
+    );
     const rawDeals = shouldScanAllViews(params)
       ? await scanViews(ctx, {
         entity: "deals",
@@ -155,8 +161,12 @@ export const listDealsTool = defineTool({
         stage: params.stage ?? null,
         view: params.view ?? null,
         filter_by: params.filterBy ?? null,
+        filter_api_field: filterResolution?.apiField.name ?? null,
+        filter_ui_label: filterResolution?.apiField.label ?? null,
         filter_value: params.filterValue ?? null,
         sort_by: params.sortBy ?? null,
+        sort_api_field: sortResolution?.apiField.name ?? null,
+        sort_ui_label: sortResolution?.apiField.label ?? null,
         sort_order: params.sortBy ? params.sortOrder : null,
         sort_scope: params.sortBy ? (nativeSort ? "freshsales" : "page") : null,
         owner: params.owner ?? null,
