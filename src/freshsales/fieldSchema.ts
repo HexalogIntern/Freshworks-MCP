@@ -203,7 +203,9 @@ export function resolveFilterValueForField(field: FreshsalesFieldDefinition, req
 
 export function isChoiceBackedField(field: FreshsalesFieldDefinition): boolean {
   const type = field.type?.toLowerCase();
-  return type === "dropdown" || type === "multi_select_dropdown" || Boolean(field.choiceIdByLabel);
+  return type === "dropdown"
+    || type === "multi_select_dropdown"
+    || Object.keys(field.choiceIdByLabel ?? {}).length > 0;
 }
 
 export function resolveChoiceValueForField(field: FreshsalesFieldDefinition, requested: string): string | number {
@@ -233,7 +235,7 @@ export function choiceDisplayValue(field: FreshsalesFieldDefinition, rawValue: u
   }
 
   const raw = String(rawValue);
-  return field.choiceLabelById?.[raw] ?? (field.choiceLabelById ? `Unresolved (id: ${raw})` : rawValue);
+  return field.choiceLabelById?.[raw] ?? (Object.keys(field.choiceLabelById ?? {}).length > 0 ? `Unresolved (id: ${raw})` : rawValue);
 }
 
 function resolveFieldValue(
@@ -392,6 +394,10 @@ function persistedCacheKey(ctx: ToolExecutionContext, entity: FieldSchemaEntity)
 
 const relationFieldIncludes = new Map<string, string>([
   ["lifecycle_stage_id", "lifecycle_stage"],
+  ["contact_status_id", "contact_status"],
+  ["contact_status", "contact_status"],
+  ["lead_source_id", "source"],
+  ["source", "source"],
   ["sales_accounts", "sales_accounts"],
   ["sales_account_id", "sales_account"],
   ["sales_account", "sales_account"],

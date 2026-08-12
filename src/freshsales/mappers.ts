@@ -87,17 +87,17 @@ export function ownerNameFromRecord(record: Record<string, unknown>): string | n
 
 export function contactStatusFromRecord(record: Record<string, unknown>): string | null {
   return (
-    stringValue(asRecord(record.lifecycle_stage).name) ??
     stringValue(asRecord(record.contact_status).name) ??
     stringValue(asRecord(record.status).name) ??
-    stringValue(record.lifecycle_stage_name) ??
     stringValue(record.contact_status_name) ??
     stringValue(record.status_name) ??
     stringValue(record.stage_name) ??
     stringValue(record.status) ??
     stringValue(record.stage) ??
-    stringValue(record.lifecycle_stage_id) ??
-    stringValue(record.contact_status_id)
+    stringValue(asRecord(record.lifecycle_stage).name) ??
+    stringValue(record.lifecycle_stage_name) ??
+    stringValue(record.contact_status_id) ??
+    stringValue(record.lifecycle_stage_id)
   );
 }
 
