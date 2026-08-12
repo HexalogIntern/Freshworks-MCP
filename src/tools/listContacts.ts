@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
-import { dynamicRecordFromSchema, fetchFieldSchema, fieldComparableValues, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationDisplayValue, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { dynamicRecordFromSchema, fetchFieldSchema, fieldComparableValues, isFieldSchemaCacheMiss, mergeIncludes, relationDisplayValue, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { cachedViewsForFilter } from "../freshsales/viewCache.js";
 import { listContactViews, resolveContactViewId } from "../freshsales/views.js";
 import { AppError } from "../utils/errors.js";
@@ -334,12 +334,13 @@ function matchesSource(record: Record<string, unknown>, filters: {
     return true;
   }
 
-  const sourceValue = filters.sourceField ? fieldValueFor(record, filters.sourceField) : undefined;
-  if (sourceValue !== undefined && sourceValue !== null && String(sourceValue).trim() !== "") {
-    return matchesText(sourceValue, filters.source, filters.matchMode);
+  const source = filters.source;
+  const sourceValues = filters.sourceField ? fieldComparableValues(record, filters.sourceField) : [];
+  if (sourceValues.length > 0) {
+    return sourceValues.some(candidate => matchesText(candidate, source, filters.matchMode));
   }
 
-  return filters.viewName ? matchesViewName(filters.viewName, filters.source) : true;
+  return filters.viewName ? matchesViewName(filters.viewName, source) : true;
 }
 
 function matchesViewName(viewName: string, source: string): boolean {
