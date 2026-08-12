@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
 import { clearFieldSchemaCache } from "../src/freshsales/fieldSchema.js";
-import { scanView } from "../src/freshsales/paginatedScan.js";
+import { scanView, scanViews } from "../src/freshsales/paginatedScan.js";
 import { FreshsalesClient } from "../src/freshsales/client.js";
 import { ApprovalStore } from "../src/state/approvalStore.js";
 import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
@@ -46,7 +46,9 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     localRateLimitPerMinute: 60,
     pipelineSummaryMaxPages: 5,
     contactsScanMaxPages: 10,
+    contactsScanMaxViews: 15,
     dealsScanMaxPages: 10,
+    dealsScanMaxViews: 15,
     fieldSchemaCacheTtlMs: 3600000,
     freshsalesRequestTimeoutMs: 10000,
     mcpRequestTimeoutMs: 25000,
@@ -148,6 +150,50 @@ describe("paginated scan", () => {
 
     expect(scan.scannedRecords).toBe(2);
     expect(scan.truncated).toBe(false);
+  });
+
+  it("deduplicates multi-view matches and records every matched view", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path.includes("paid")) {
+        return { contacts: [{ id: 1, display_name: "Ada" }] } as T;
+      }
+
+      return { contacts: [{ id: 1, display_name: "Ada" }, { id: 2, display_name: "Grace" }] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const scan = await scanViews(ctx, {
+      entity: "contacts",
+      views: [{ id: "paid", name: "Paid Media" }, { id: "all", name: "All Contacts" }],
+      maxViews: 2,
+      perPage: 50,
+      maxPages: 1,
+      annotateMatchedView: true,
+      matches: () => true
+    });
+
+    expect(scan.records).toMatchObject([
+      { id: 1, matched_views: ["Paid Media", "All Contacts"] },
+      { id: 2, matched_views: ["All Contacts"] }
+    ]);
+  });
+
+  it("reports skipped views and truncation when the multi-view cap is hit", async () => {
+    const get = vi.fn(async <T>() => ({ contacts: [] }) as T);
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const scan = await scanViews(ctx, {
+      entity: "contacts",
+      views: [{ id: "1", name: "One" }, { id: "2", name: "Two" }, { id: "3", name: "Three" }],
+      maxViews: 2,
+      perPage: 50,
+      maxPages: 1,
+      matches: () => true
+    });
+
+    expect(scan.viewsScanned).toEqual(["One", "Two"]);
+    expect(scan.viewsSkippedDueToCap).toEqual(["Three"]);
+    expect(scan.truncated).toBe(true);
   });
 });
 
@@ -533,7 +579,7 @@ describe("contact tools", () => {
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);
-    expect(propose.payload).toMatchObject({ estimated_call_count: 11 });
+    expect(propose.payload).toMatchObject({ estimated_call_count: 152 });
     expect(approve.payload).toMatchObject({
       data: [
         {
@@ -776,7 +822,7 @@ describe("deal tools", () => {
     const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] }, appConfig: config({ dealsScanMaxPages: 5 }) });
 
     const propose = await runTool(listDealsTool, { owner: "Grace", date_from: "2026-08-01", date_to: "2026-08-31", per_page: 2 }, ctx);
-    expect(propose.payload).toMatchObject({ estimated_call_count: 6 });
+    expect(propose.payload).toMatchObject({ estimated_call_count: 77 });
     const approve = await runTool(listDealsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
 
     expect(approve.isError).toBe(false);

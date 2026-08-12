@@ -1,8 +1,9 @@
 import { z } from "zod";
 
 import { amountFromDeal, getCollection, linkedAccountFromDeal, linkedContactFromDeal, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal, weightedValueFromDeal } from "../freshsales/mappers.js";
-import { scanView } from "../freshsales/paginatedScan.js";
+import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { listDealViews, resolveDealViewId } from "../freshsales/views.js";
 import { AppError } from "../utils/errors.js";
 import { isIsoDate } from "../utils/time.js";
 import type { ToolExecutionContext } from "./common.js";
@@ -45,10 +46,6 @@ interface ListDealsParams {
   perPage: number;
 }
 
-interface FilterPayload {
-  filters?: Array<{ id?: string | number; name?: string }>;
-}
-
 export const listDealsTool = defineTool({
   name: "list_deals",
   title: "List Deals",
@@ -80,8 +77,11 @@ export const listDealsTool = defineTool({
     };
   },
   estimateCallCount(params, ctx) {
+    const multiView = shouldScanAllViews(params);
     const scanPages = shouldScan(params) ? ctx.config.dealsScanMaxPages : 1;
-    return (params.view ? 1 : 0) + scanPages + (isFieldSchemaCacheMiss(ctx, "deals") ? 1 : 0);
+    return (params.view || multiView ? 1 : 0)
+      + (multiView ? scanPages * ctx.config.dealsScanMaxViews : scanPages)
+      + (isFieldSchemaCacheMiss(ctx, "deals") ? 1 : 0);
   },
   async execute(params, ctx) {
     const fieldSchema = await fetchFieldSchema(ctx, "deals");
@@ -93,7 +93,18 @@ export const listDealsTool = defineTool({
     const nativeSort = sortField && nativeDealSortFields.has(sortField.name);
 
     const include = "owner,sales_account,contacts,deal_stage";
-    const rawDeals = shouldScan(params)
+    const rawDeals = shouldScanAllViews(params)
+      ? await scanViews(ctx, {
+        entity: "deals",
+        views: await dealViewsForScan(ctx),
+        maxViews: ctx.config.dealsScanMaxViews,
+        perPage: params.perPage,
+        maxPages: ctx.config.dealsScanMaxPages,
+        include,
+        annotateMatchedView: true,
+        matches: deal => matchesDeal(deal, params, filterField)
+      })
+      : shouldScan(params)
       ? (await scanView(ctx, {
         entity: "deals",
         viewId,
@@ -126,6 +137,8 @@ export const listDealsTool = defineTool({
       page: params.page,
       per_page: params.perPage,
       scanned_records: "scannedRecords" in rawDeals ? rawDeals.scannedRecords : dealsForOutput.length,
+      views_scanned: "viewsScanned" in rawDeals ? rawDeals.viewsScanned : [],
+      views_skipped_due_to_cap: "viewsSkippedDueToCap" in rawDeals ? rawDeals.viewsSkippedDueToCap : [],
       truncated: "truncated" in rawDeals ? rawDeals.truncated : false,
       filters_applied: {
         stage: params.stage ?? null,
@@ -151,6 +164,15 @@ function shouldScan(params: ListDealsParams): boolean {
   return Boolean(params.stage || params.filterBy || params.owner || params.dateFrom || params.dateTo);
 }
 
+function shouldScanAllViews(params: ListDealsParams): boolean {
+  return shouldScan(params) && !params.view;
+}
+
+async function dealViewsForScan(ctx: ToolExecutionContext) {
+  const views = await listDealViews(ctx);
+  return views.length > 0 ? views : [{ id: ctx.config.defaultDealsViewId, name: "Default deals view" }];
+}
+
 async function fetchDealsPage(
   ctx: ToolExecutionContext,
   viewId: string,
@@ -169,21 +191,6 @@ async function fetchDealsPage(
   });
 
   return getCollection(payload, "deals");
-}
-
-async function resolveDealViewId(ctx: ToolExecutionContext, view: string): Promise<string> {
-  const payload = await ctx.freshsales.get<FilterPayload>("api/deals/filters");
-  const matched = payload.filters?.find(candidate => {
-    const id = candidate.id !== undefined ? String(candidate.id) : "";
-    const name = candidate.name?.toLowerCase() ?? "";
-    return id === view || name === view.toLowerCase();
-  });
-
-  if (!matched?.id) {
-    throw new AppError("INVALID_FILTER", `Unknown Freshsales deal filter: ${view}.`);
-  }
-
-  return String(matched.id);
 }
 
 function matchesStage(record: Record<string, unknown>, stage?: "open" | "won" | "lost"): boolean {

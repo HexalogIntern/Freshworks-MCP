@@ -1,8 +1,9 @@
 import { z } from "zod";
 
 import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
-import { scanView } from "../freshsales/paginatedScan.js";
+import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
+import { listContactViews, resolveContactViewId } from "../freshsales/views.js";
 import { AppError } from "../utils/errors.js";
 import { isIsoDate } from "../utils/time.js";
 import type { ToolExecutionContext } from "./common.js";
@@ -46,10 +47,6 @@ interface ListContactsParams {
   perPage: number;
 }
 
-interface FilterPayload {
-  filters?: Array<{ id?: string | number; name?: string }>;
-}
-
 export const listContactsTool = defineTool({
   name: "list_contacts",
   title: "List Contacts",
@@ -82,11 +79,15 @@ export const listContactsTool = defineTool({
     };
   },
   estimateCallCount(params, ctx) {
+    const multiView = shouldScanAllViews(params);
     const scanPages = shouldScan(params) ? ctx.config.contactsScanMaxPages : 1;
     const hydrationCalls = params.hydrateRelations
-      ? (shouldScan(params) ? ctx.config.contactsScanMaxPages * params.perPage : params.perPage)
+      ? (shouldScan(params) ? scanPages * params.perPage * (multiView ? ctx.config.contactsScanMaxViews : 1) : params.perPage)
       : 0;
-    return (params.view ? 1 : 0) + scanPages + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0) + hydrationCalls;
+    return (params.view || multiView ? 1 : 0)
+      + (multiView ? scanPages * ctx.config.contactsScanMaxViews : scanPages)
+      + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0)
+      + hydrationCalls;
   },
   async execute(params, ctx) {
     if (params.hydrateRelations && params.perPage > 10) {
@@ -104,7 +105,28 @@ export const listContactsTool = defineTool({
     const nativeSort = sortField && nativeContactSortFields.has(sortField.name);
 
     const include = "owner,sales_account";
-    const rawContacts = shouldScan(params)
+    const rawContacts = shouldScanAllViews(params)
+      ? await scanViews(ctx, {
+        entity: "contacts",
+        views: await contactViewsForScan(ctx),
+        maxViews: ctx.config.contactsScanMaxViews,
+        perPage: params.perPage,
+        maxPages: ctx.config.contactsScanMaxPages,
+        include,
+        annotateMatchedView: true,
+        matches: (contact, view) => matchesContact(contact, {
+          sourceField,
+          source: params.source,
+          filterField,
+          filterValue: params.filterValue,
+          matchMode: params.matchMode,
+          owner: params.owner,
+          dateFrom: params.dateFrom,
+          dateTo: params.dateTo,
+          viewName: view?.name
+        })
+      })
+      : shouldScan(params)
       ? (await scanView(ctx, {
         entity: "contacts",
         viewId,
@@ -146,6 +168,8 @@ export const listContactsTool = defineTool({
       page: params.page,
       per_page: params.perPage,
       scanned_records: "scannedRecords" in rawContacts ? rawContacts.scannedRecords : contactsForOutput.length,
+      views_scanned: "viewsScanned" in rawContacts ? rawContacts.viewsScanned : [],
+      views_skipped_due_to_cap: "viewsSkippedDueToCap" in rawContacts ? rawContacts.viewsSkippedDueToCap : [],
       truncated: "truncated" in rawContacts ? rawContacts.truncated : false,
       filters_applied: {
         view: params.view ?? null,
@@ -172,6 +196,15 @@ function shouldScan(params: ListContactsParams): boolean {
   return Boolean(params.source || params.filterBy || params.owner || params.dateFrom || params.dateTo);
 }
 
+function shouldScanAllViews(params: ListContactsParams): boolean {
+  return shouldScan(params) && !params.view;
+}
+
+async function contactViewsForScan(ctx: ToolExecutionContext) {
+  const views = await listContactViews(ctx);
+  return views.length > 0 ? views : [{ id: ctx.config.defaultContactsViewId, name: "Default contacts view" }];
+}
+
 async function fetchContactsPage(
   ctx: ToolExecutionContext,
   viewId: string,
@@ -190,21 +223,6 @@ async function fetchContactsPage(
   });
 
   return getCollection(payload, "contacts");
-}
-
-async function resolveContactViewId(ctx: ToolExecutionContext, view: string): Promise<string> {
-  const payload = await ctx.freshsales.get<FilterPayload>("api/contacts/filters");
-  const matched = payload.filters?.find(candidate => {
-    const id = candidate.id !== undefined ? String(candidate.id) : "";
-    const name = candidate.name?.toLowerCase() ?? "";
-    return id === view || name === view.toLowerCase();
-  });
-
-  if (!matched?.id) {
-    throw new AppError("INVALID_FILTER", `Unknown Freshsales contact filter: ${view}.`);
-  }
-
-  return String(matched.id);
 }
 
 async function hydrateContactRelations(
@@ -244,11 +262,38 @@ function matchesContact(record: Record<string, unknown>, filters: {
   owner?: string;
   dateFrom?: string;
   dateTo?: string;
+  viewName?: string;
 }): boolean {
-  return matchesDynamicFilter(record, filters.sourceField, filters.source, filters.matchMode, "source")
+  return matchesSource(record, filters)
     && matchesDynamicFilter(record, filters.filterField, filters.filterValue, filters.matchMode, "filter_value")
     && matchesOwner(record, filters.owner)
     && matchesDateRange(record, filters.dateFrom, filters.dateTo);
+}
+
+function matchesSource(record: Record<string, unknown>, filters: {
+  sourceField?: FreshsalesFieldDefinition;
+  source?: string;
+  matchMode: "exact" | "contains";
+  viewName?: string;
+}): boolean {
+  if (!filters.source) {
+    return true;
+  }
+
+  const sourceValue = filters.sourceField ? fieldValueFor(record, filters.sourceField) : undefined;
+  if (sourceValue !== undefined && sourceValue !== null && String(sourceValue).trim() !== "") {
+    return matchesText(sourceValue, filters.source, filters.matchMode);
+  }
+
+  return filters.viewName ? matchesViewName(filters.viewName, filters.source) : true;
+}
+
+function matchesViewName(viewName: string, source: string): boolean {
+  return normalizeToken(viewName).includes(normalizeToken(source));
+}
+
+function normalizeToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function matchesDynamicFilter(
