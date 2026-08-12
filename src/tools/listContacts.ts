@@ -81,12 +81,19 @@ export const listContactsTool = defineTool({
   },
   estimateCallCount(params, ctx) {
     const multiView = shouldScanAllViews(params);
+    const cachedViewCount = multiView
+      ? cachedViewsForFilter("contacts", ctx.config, {
+        field: params.source ? "source" : params.filterBy,
+        value: params.source ?? params.filterValue
+      }).length
+      : 0;
+    const viewsToScan = cachedViewCount > 0 ? cachedViewCount : ctx.config.contactsScanMaxViews;
     const scanPages = shouldScan(params) ? ctx.config.contactsScanMaxPages : 1;
     const hydrationCalls = params.hydrateRelations
-      ? (shouldScan(params) ? scanPages * params.perPage * (multiView ? ctx.config.contactsScanMaxViews : 1) : params.perPage)
+      ? (shouldScan(params) ? scanPages * params.perPage * (multiView ? viewsToScan : 1) : params.perPage)
       : 0;
-    return (params.view || multiView ? 1 : 0)
-      + (multiView ? scanPages * ctx.config.contactsScanMaxViews : scanPages)
+    return (params.view || (multiView && cachedViewCount === 0) ? 1 : 0)
+      + (multiView ? scanPages * viewsToScan : scanPages)
       + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0)
       + hydrationCalls;
   },

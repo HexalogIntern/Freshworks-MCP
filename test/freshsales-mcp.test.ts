@@ -536,6 +536,8 @@ describe("contact tools", () => {
 
     get.mockClear();
     const proposeList = await runTool(listContactsTool, { source: "paid_meta", per_page: 50 }, ctx);
+    expect(proposeList.payload).toMatchObject({ estimated_call_count: 11 });
+
     const approveList = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(proposeList) }, ctx);
 
     expect(approveList.isError).toBe(false);

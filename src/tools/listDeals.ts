@@ -79,9 +79,16 @@ export const listDealsTool = defineTool({
   },
   estimateCallCount(params, ctx) {
     const multiView = shouldScanAllViews(params);
+    const cachedViewCount = multiView
+      ? cachedViewsForFilter("deals", ctx.config, {
+        field: params.filterBy ?? (params.stage ? "stage" : undefined),
+        value: params.filterValue ?? params.stage
+      }).length
+      : 0;
+    const viewsToScan = cachedViewCount > 0 ? cachedViewCount : ctx.config.dealsScanMaxViews;
     const scanPages = shouldScan(params) ? ctx.config.dealsScanMaxPages : 1;
-    return (params.view || multiView ? 1 : 0)
-      + (multiView ? scanPages * ctx.config.dealsScanMaxViews : scanPages)
+    return (params.view || (multiView && cachedViewCount === 0) ? 1 : 0)
+      + (multiView ? scanPages * viewsToScan : scanPages)
       + (isFieldSchemaCacheMiss(ctx, "deals") ? 1 : 0);
   },
   async execute(params, ctx) {

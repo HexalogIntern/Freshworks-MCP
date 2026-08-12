@@ -4,14 +4,21 @@ Read-only MCP server for live Freshsales CRM access from Claude. Every tool uses
 
 ## Tools
 
-- `list_leads(filter, page, per_page)`
-- `get_lead(id)`
-- `list_deals(stage, owner, date_from, date_to, page, per_page)`
+- `discover_views(entity, sample_pages_per_view)`
+- `list_contacts(view, source, filter_by, filter_value, match_mode, owner, date_from, date_to, page, per_page)`
+- `get_contact(id)`
+- `list_deals(stage, view, filter_by, filter_value, match_mode, owner, date_from, date_to, page, per_page)`
 - `get_deal(id)`
 - `search_contacts(query, page, per_page)`
 - `list_notes(entity_type, entity_id)`
 - `pipeline_summary(group_by)`
 - `usage_status()`
+
+### View Discovery and Filter Performance
+
+`discover_views` proactively scans saved Freshsales contact and deal views, samples up to `sample_pages_per_view` pages per view, and caches which fields and sample values appear in each view. Run it once after deploy, and again after adding new custom Freshsales views or when you suspect the cache is stale.
+
+This keeps later filtered `list_contacts` and `list_deals` calls cheaper: when the cache knows a view contains a matching `source` or `filter_by` value, the list tool can scan that likely view first instead of immediately falling back to a broad multi-view scan. The tool is still read-only, still uses the normal propose-then-approve flow, and its real Freshsales calls count against `DAILY_CALL_LIMIT`.
 
 ## Environment
 
@@ -19,7 +26,7 @@ Copy `.env.example` to `.env` locally and set:
 
 - `FRESHSALES_API_KEY`: Freshsales API key, server-side only.
 - `FRESHSALES_DOMAIN`: Freshsales domain, for example `https://example.myfreshworks.com`.
-- `FRESHSALES_DEFAULT_LEADS_VIEW_ID`: Freshsales leads view id used by `list_leads`.
+- `FRESHSALES_DEFAULT_CONTACTS_VIEW_ID`: Freshsales contacts view id used by `list_contacts`.
 - `FRESHSALES_DEFAULT_DEALS_VIEW_ID`: Freshsales deals view id used by `list_deals` and `pipeline_summary`.
 - `OAUTH_CLIENT_ID`: Static OAuth client id for Claude custom connector setup.
 - `OAUTH_CLIENT_SECRET`: Static OAuth client secret for Claude custom connector setup.
@@ -32,6 +39,15 @@ Copy `.env.example` to `.env` locally and set:
 - `FRESHSALES_MAX_RETRY_WAIT_MS`: Max retry wait, default `2000`.
 - `LOCAL_RATE_LIMIT_PER_MINUTE`: Local per-minute safety cap, default `60`.
 - `PIPELINE_SUMMARY_MAX_PAGES`: Max deal pages scanned by `pipeline_summary`, default `5`.
+- `CONTACTS_SCAN_MAX_PAGES`: Max pages scanned per contacts view for filtered contact queries, default `10`.
+- `CONTACTS_SCAN_MAX_VIEWS`: Max contact views scanned during a broad filtered contact search, default `15`.
+- `DEALS_SCAN_MAX_PAGES`: Max pages scanned per deals view for filtered deal queries, default `10`.
+- `DEALS_SCAN_MAX_VIEWS`: Max deal views scanned during a broad filtered deal search, default `15`.
+- `FIELD_SCHEMA_CACHE_TTL_MS`: In-memory Freshsales field metadata cache TTL in milliseconds, default `3600000`.
+- `VIEW_LIST_CACHE_TTL_MS`: In-memory saved-view list cache TTL in milliseconds, default `3600000`.
+- `VIEW_FIELD_COVERAGE_CACHE_TTL_MS`: In-memory view field/value coverage cache TTL in milliseconds, default `3600000`.
+- `FRESHSALES_REQUEST_TIMEOUT_MS`: Freshsales upstream request timeout in milliseconds, default `10000`.
+- `MCP_REQUEST_TIMEOUT_MS`: MCP HTTP request timeout in milliseconds, default `25000`.
 
 ## Local Run
 
