@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { contactStatusNameForId, fetchContactStatusLookup, isContactStatusCacheMiss, type ContactStatusLookup } from "../freshsales/contactStatusCache.js";
 import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldComparableValues, isFieldSchemaCacheMiss, mergeIncludes, relationDisplayValue, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
@@ -52,7 +53,7 @@ export const listContactsTool = defineTool({
   name: "list_contacts",
   title: "List Contacts",
   description:
-    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Field output, source, filter_by, and sort_by accept either raw API field names or UI display labels, case-insensitively, and are validated against Freshsales contact field metadata. Relation-backed fields such as Status are resolved with targeted include params for filtering/sorting, so hydrate_relations is usually not needed for those queries. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered source/filter_by queries can go straight to likely matching views instead of broad multi-view scanning. Filtered queries scan up to CONTACTS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for source and filter_value.",
+    "Preview or list live Freshsales contacts from the configured default contacts view, or pass view to target any saved Freshsales view by name or id. Field output, source, filter_by, and sort_by accept either raw API field names or UI display labels, case-insensitively, and are validated against Freshsales contact field metadata. Status filters resolve contact_status_id through a cached Freshsales status selector lookup; other relation-backed fields use targeted include params where supported. Run discover_views once after deploy or after adding custom Freshsales views to warm the view cache; then filtered source/filter_by queries can go straight to likely matching views instead of broad multi-view scanning. Filtered queries scan up to CONTACTS_SCAN_MAX_PAGES pages and return scanned_records plus truncated when the scan cap is reached. match_mode defaults to exact; contains performs a case-insensitive substring match for source and filter_value.",
   inputSchema: schema,
   resolve(input): ListContactsParams {
     if (input.date_from && !isIsoDate(input.date_from)) {
@@ -93,6 +94,7 @@ export const listContactsTool = defineTool({
     return (params.view || (multiView && cachedViewCount === 0) ? 1 : 0)
       + (multiView ? scanPages * viewsToScan : scanPages)
       + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0)
+      + (params.filterBy && looksLikeStatusField(params.filterBy) && isContactStatusCacheMiss(ctx) ? 1 : 0)
       + typicalHydrationCalls;
   },
   estimateCallCountDetails(params, ctx, estimatedCallCount) {
@@ -111,6 +113,7 @@ export const listContactsTool = defineTool({
     const worstCase = (params.view || (multiView && cachedViewCount === 0) ? 1 : 0)
       + (multiView ? scanPages * viewsToScan : scanPages)
       + (isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0)
+      + (params.filterBy && looksLikeStatusField(params.filterBy) && isContactStatusCacheMiss(ctx) ? 1 : 0)
       + worstCaseHydration;
 
     return {
@@ -118,7 +121,7 @@ export const listContactsTool = defineTool({
       estimated_call_count_worst_case: worstCase,
       estimate_note: params.hydrateRelations
         ? "Typical estimate hydrates only post-filter matches; worst_case assumes every scanned record matches."
-        : "Relation-backed filter/sort fields use targeted include params and usually do not need hydrate_relations."
+        : "Status filters use a cached selector lookup; other relation-backed filter/sort fields use targeted include params where supported."
     };
   },
   async execute(params, ctx) {
@@ -132,6 +135,9 @@ export const listContactsTool = defineTool({
     const sourceField = params.source ? validateFieldName(fieldSchema, "source") : undefined;
     const sortResolution = params.sortBy ? resolveFieldAlias(fieldSchema, params.sortBy) : undefined;
     const sortField = sortResolution?.apiField;
+    const contactStatusLookup = filterField?.name === "contact_status_id" || sortField?.name === "contact_status_id"
+      ? await fetchContactStatusLookup(ctx)
+      : undefined;
     const viewId = params.view
       ? await resolveContactViewId(ctx, params.view)
       : ctx.config.defaultContactsViewId;
@@ -165,6 +171,7 @@ export const listContactsTool = defineTool({
           filterField,
           filterValue: params.filterValue,
           matchMode: params.matchMode,
+          contactStatusLookup,
           owner: params.owner,
           dateFrom: params.dateFrom,
           dateTo: params.dateTo,
@@ -184,6 +191,7 @@ export const listContactsTool = defineTool({
           filterField,
           filterValue: params.filterValue,
           matchMode: params.matchMode,
+          contactStatusLookup,
           owner: params.owner,
           dateFrom: params.dateFrom,
           dateTo: params.dateTo
@@ -191,15 +199,15 @@ export const listContactsTool = defineTool({
       }))
       : await fetchContactsPage(ctx, viewId, params, include, nativeSort ? sortField?.name : undefined);
     const contactsForOutput = "records" in rawContacts ? rawContacts.records : rawContacts;
-    const hydratedContacts = params.hydrateRelations && shouldHydrateContactRelations(include, requestedRelationIncludes)
+    const hydratedContacts = params.hydrateRelations && shouldHydrateContactRelations(include, requestedRelationIncludes, Boolean(filterField || sortField))
       ? await hydrateContactRelations(contactsForOutput, ctx)
       : contactsForOutput;
 
     const contacts = hydratedContacts
-      .sort((left, right) => sortField && !nativeSort ? compareFieldValues(left, right, sortField, params.sortOrder) : 0)
+      .sort((left, right) => sortField && !nativeSort ? compareFieldValues(left, right, sortField, params.sortOrder, contactStatusLookup) : 0)
       .map(contact => ({
         ...dynamicRecordFromSchema(contact, fieldSchema),
-        status: contactStatusFromRecord(contact),
+        status: contactStatusNameForId(contactStatusLookup, contact.contact_status_id) ?? contactStatusFromRecord(contact),
         tags: tagNamesFromRecord(contact),
         owner: ownerNameFromRecord(contact),
         account: accountNameFromRecord(contact),
@@ -313,13 +321,14 @@ function matchesContact(record: Record<string, unknown>, filters: {
   filterField?: FreshsalesFieldDefinition;
   filterValue?: string;
   matchMode: "exact" | "contains";
+  contactStatusLookup?: ContactStatusLookup;
   owner?: string;
   dateFrom?: string;
   dateTo?: string;
   viewName?: string;
 }): boolean {
   return matchesSource(record, filters)
-    && matchesDynamicFilter(record, filters.filterField, filters.filterValue, filters.matchMode, "filter_value")
+    && matchesDynamicFilter(record, filters.filterField, filters.filterValue, filters.matchMode, "filter_value", filters.contactStatusLookup)
     && matchesOwner(record, filters.owner)
     && matchesDateRange(record, filters.dateFrom, filters.dateTo);
 }
@@ -356,7 +365,8 @@ function matchesDynamicFilter(
   field: FreshsalesFieldDefinition | undefined,
   filterValue: string | undefined,
   matchMode: "exact" | "contains",
-  valueName: string
+  valueName: string,
+  contactStatusLookup?: ContactStatusLookup
 ): boolean {
   if (!field) {
     return true;
@@ -366,7 +376,7 @@ function matchesDynamicFilter(
     throw new AppError("MISSING_FILTER_VALUE", `${valueName} is required when its field is provided.`);
   }
 
-  return fieldComparableValues(record, field).some(candidate => matchesText(candidate, filterValue, matchMode));
+  return comparableValues(record, field, contactStatusLookup).some(candidate => matchesText(candidate, filterValue, matchMode));
 }
 
 function matchesText(candidate: unknown, expected: string, mode: "exact" | "contains"): boolean {
@@ -375,15 +385,44 @@ function matchesText(candidate: unknown, expected: string, mode: "exact" | "cont
   return mode === "contains" ? left.includes(right) : left === right;
 }
 
-function compareFieldValues(left: Record<string, unknown>, right: Record<string, unknown>, field: FreshsalesFieldDefinition, order: "asc" | "desc"): number {
+function compareFieldValues(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+  field: FreshsalesFieldDefinition,
+  order: "asc" | "desc",
+  contactStatusLookup?: ContactStatusLookup
+): number {
   const direction = order === "asc" ? 1 : -1;
-  return compareValues(relationDisplayValue(left, field), relationDisplayValue(right, field)) * direction;
+  return compareValues(displayValue(left, field, contactStatusLookup), displayValue(right, field, contactStatusLookup)) * direction;
 }
 
-function shouldHydrateContactRelations(include: string, requestedRelationIncludes: string): boolean {
+function comparableValues(record: Record<string, unknown>, field: FreshsalesFieldDefinition, contactStatusLookup?: ContactStatusLookup): unknown[] {
+  const statusName = field.name === "contact_status_id" ? contactStatusNameForId(contactStatusLookup, record.contact_status_id) : null;
+  const values = statusName ? [statusName, ...fieldComparableValues(record, field)] : fieldComparableValues(record, field);
+  return values.filter((value, index) => {
+    if (value === undefined || value === null || String(value).trim() === "") {
+      return false;
+    }
+
+    return values.findIndex(candidate => String(candidate) === String(value)) === index;
+  });
+}
+
+function displayValue(record: Record<string, unknown>, field: FreshsalesFieldDefinition, contactStatusLookup?: ContactStatusLookup): unknown {
+  return field.name === "contact_status_id"
+    ? contactStatusNameForId(contactStatusLookup, record.contact_status_id) ?? relationDisplayValue(record, field)
+    : relationDisplayValue(record, field);
+}
+
+function looksLikeStatusField(field: string): boolean {
+  const normalized = field.trim().toLowerCase().replace(/[\s_-]+/g, "");
+  return normalized === "status" || normalized === "contactstatus" || normalized === "contactstatusid";
+}
+
+function shouldHydrateContactRelations(include: string, requestedRelationIncludes: string, hasFieldDrivenRelationRequest: boolean): boolean {
   const requested = includesToSet(requestedRelationIncludes);
   if (requested.size === 0) {
-    return true;
+    return !hasFieldDrivenRelationRequest;
   }
 
   const fetched = includesToSet(include);

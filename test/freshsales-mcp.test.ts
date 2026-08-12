@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
+import { clearContactStatusCache, fetchContactStatusLookup } from "../src/freshsales/contactStatusCache.js";
 import { clearFieldSchemaCache, clearFieldSchemaMemoryCache } from "../src/freshsales/fieldSchema.js";
 import { scanView, scanViews } from "../src/freshsales/paginatedScan.js";
 import { FreshsalesClient } from "../src/freshsales/client.js";
@@ -27,6 +28,7 @@ const logger: Logger = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearContactStatusCache();
   clearFieldSchemaCache();
   clearViewCaches();
 });
@@ -852,7 +854,23 @@ describe("contact tools", () => {
     });
   });
 
-  it("auto-adds targeted contact relation includes when filtering by a UI label like status", async () => {
+  it("builds contact status lookup from the selector endpoint", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: "402002304551", name: "CC Qualified" }] } as T;
+      }
+
+      return {} as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const lookup = await fetchContactStatusLookup(ctx);
+
+    expect(lookup.sourcePath).toBe("api/selector/contact_statuses");
+    expect(lookup.idToName.get("402002304551")).toBe("CC Qualified");
+  });
+
+  it("filters contact status by raw ID when using a UI label like status", async () => {
     const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string } }) => {
       if (path === "api/settings/contacts/fields") {
         return {
@@ -863,11 +881,15 @@ describe("contact tools", () => {
         } as T;
       }
 
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: 10, name: "CC Qualified" }, { id: 20, name: "New" }] } as T;
+      }
+
       if (path === "api/contacts/filters") {
         return { filters: [] } as T;
       }
 
-      expect(options?.query?.include).toContain("contact_status");
+      expect(options?.query?.include).toBe("owner,sales_account");
       return {
         contacts: [
           { id: 1, contact_status_id: 10 },
@@ -891,7 +913,7 @@ describe("contact tools", () => {
     });
   });
 
-  it("filters contact status by included display name without hydrate_relations", async () => {
+  it("filters contact status by selector display name without hydrate_relations", async () => {
     const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string; page?: number } }) => {
       if (path === "api/settings/contacts/fields") {
         return {
@@ -903,24 +925,26 @@ describe("contact tools", () => {
         } as T;
       }
 
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: "402002304551", name: "CC Qualified" }, { id: 20, name: "New" }] } as T;
+      }
+
       if (path === "api/contacts/filters") {
         return { filters: [{ id: "bhavesh-view", name: "Bhavesh View" }] } as T;
       }
 
-      expect(options?.query?.include).toContain("contact_status");
+      expect(options?.query?.include).toBe("owner,sales_account");
       return {
         contacts: [
           {
             id: 1,
             display_name: "Bhavesh",
-            contact_status_id: 10,
-            contact_status: { id: 10, name: "CC Qualified" }
+            contact_status_id: "402002304551"
           },
           {
             id: 2,
             display_name: "Ada",
-            contact_status_id: 20,
-            contact_status: { id: 20, name: "New" }
+            contact_status_id: 20
           }
         ]
       } as T;
@@ -935,9 +959,9 @@ describe("contact tools", () => {
     }, ctx);
 
     expect(propose.payload).toMatchObject({
-      estimated_call_count: 12,
-      estimated_call_count_typical: 12,
-      estimated_call_count_worst_case: 12
+      estimated_call_count: 13,
+      estimated_call_count_typical: 13,
+      estimated_call_count_worst_case: 13
     });
 
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
@@ -948,7 +972,7 @@ describe("contact tools", () => {
         id: 1,
         display_name: "Bhavesh",
         status: "CC Qualified",
-        contact_status_id: 10
+        contact_status_id: "402002304551"
       }],
       filters_applied: {
         filter_api_field: "contact_status_id",
@@ -970,16 +994,19 @@ describe("contact tools", () => {
         } as T;
       }
 
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: 10, name: "CC Qualified" }] } as T;
+      }
+
       if (path === "api/contacts/filters") {
         return { filters: [{ id: "status-view", name: "Status View" }] } as T;
       }
 
-      expect(options?.query?.include).toContain("contact_status");
+      expect(options?.query?.include).toBe("owner,sales_account");
       return {
         contacts: [{
           id: 1,
-          contact_status_id: 10,
-          contact_status: { id: 10, name: "CC Qualified" }
+          contact_status_id: 10
         }]
       } as T;
     });
@@ -993,8 +1020,8 @@ describe("contact tools", () => {
       per_page: 10
     }, ctx);
     expect(propose.payload).toMatchObject({
-      estimated_call_count: 12,
-      estimated_call_count_worst_case: 112
+      estimated_call_count: 13,
+      estimated_call_count_worst_case: 113
     });
 
     const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
@@ -1289,7 +1316,7 @@ describe("contacts summary", () => {
     });
   });
 
-  it("groups contacts by included status names instead of Unknown", async () => {
+  it("groups contacts by selector status names instead of Unknown", async () => {
     const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string } }) => {
       if (path === "api/settings/contacts/fields") {
         return {
@@ -1300,12 +1327,16 @@ describe("contacts summary", () => {
         } as T;
       }
 
-      expect(options?.query?.include).toContain("contact_status");
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: 10, name: "CC Qualified" }, { id: 20, name: "New" }] } as T;
+      }
+
+      expect(options?.query?.include).toBe("owner,sales_account");
       return {
         contacts: [
-          { id: 1, contact_status_id: 10, contact_status: { id: 10, name: "CC Qualified" } },
-          { id: 2, contact_status_id: 10, contact_status: { id: 10, name: "CC Qualified" } },
-          { id: 3, contact_status_id: 20, contact_status: { id: 20, name: "New" } }
+          { id: 1, contact_status_id: 10 },
+          { id: 2, contact_status_id: 10 },
+          { id: 3, contact_status_id: 20 }
         ]
       } as T;
     });

@@ -305,7 +305,6 @@ function persistedCacheKey(ctx: ToolExecutionContext, entity: FieldSchemaEntity)
 }
 
 const relationFieldIncludes = new Map<string, string>([
-  ["contact_status_id", "contact_status"],
   ["lifecycle_stage_id", "lifecycle_stage"],
   ["sales_accounts", "sales_accounts"],
   ["sales_account_id", "sales_account"],

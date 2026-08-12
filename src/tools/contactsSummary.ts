@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { contactStatusNameForId, fetchContactStatusLookup, isContactStatusCacheMiss, type ContactStatusLookup } from "../freshsales/contactStatusCache.js";
 import { contactStatusFromRecord } from "../freshsales/mappers.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
@@ -39,13 +40,16 @@ export const contactsSummaryTool = defineTool({
     const scanCalls = groupBy === "source"
       ? ctx.config.contactsScanMaxPages * ctx.config.contactsScanMaxViews + 1
       : ctx.config.contactsScanMaxPages;
-    return scanCalls + (groupBy !== "month" && isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0);
+    return scanCalls
+      + (groupBy !== "month" && isFieldSchemaCacheMiss(ctx, "contacts") ? 1 : 0)
+      + (groupBy === "status" && isContactStatusCacheMiss(ctx) ? 1 : 0);
   },
   async execute(params, ctx) {
     const perPage = 50;
     const fieldSchema = normalizeGroupInput(params.groupBy) === "month" ? [] : await fetchFieldSchema(ctx, "contacts");
     const groupResolution = resolveContactGroup(params.groupBy, fieldSchema);
     const sourceField = groupResolution.groupBy === "source" ? validateFieldName(fieldSchema, "source") : undefined;
+    const contactStatusLookup = groupResolution.groupBy === "status" ? await fetchContactStatusLookup(ctx) : undefined;
     const include = mergeIncludes("owner,sales_account", relationIncludeForField(groupResolution.apiField?.name ?? ""));
     const scan = groupResolution.groupBy === "source"
       ? await scanViews(ctx, {
@@ -69,7 +73,7 @@ export const contactsSummaryTool = defineTool({
     const groups = new Map<string, number>();
 
     for (const contact of scan.records) {
-      const key = groupKey(groupResolution.groupBy, contact, sourceField);
+      const key = groupKey(groupResolution.groupBy, contact, sourceField, contactStatusLookup);
       groups.set(key, (groups.get(key) ?? 0) + 1);
     }
 
@@ -93,7 +97,8 @@ export const contactsSummaryTool = defineTool({
 function groupKey(
   groupBy: "status" | "month" | "source",
   contact: Record<string, unknown>,
-  sourceField?: ReturnType<typeof validateFieldName>
+  sourceField?: ReturnType<typeof validateFieldName>,
+  contactStatusLookup?: ContactStatusLookup
 ): string {
   if (groupBy === "month") {
     return normalizeMonth(String(contact.created_at ?? ""));
@@ -110,7 +115,7 @@ function groupKey(
     return sourceView ? normalizeSourceViewName(sourceView) : "Unknown";
   }
 
-  return contactStatusFromRecord(contact) ?? "Unknown";
+  return contactStatusNameForId(contactStatusLookup, contact.contact_status_id) ?? contactStatusFromRecord(contact) ?? "Unknown";
 }
 
 function resolveContactGroup(groupBy: string, fields: FreshsalesFieldDefinition[]): {
