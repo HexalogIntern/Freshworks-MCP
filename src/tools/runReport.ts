@@ -69,6 +69,7 @@ export const runReportTool = defineTool({
       const result = await queryRecords(ctx, {
         entity: params.entity,
         groups: params.groups,
+        fields: reportFields(groupFields, metricFields),
         page,
         perPage: Math.min(100, params.limit - collected.length)
       });
@@ -105,6 +106,17 @@ export const runReportTool = defineTool({
   },
   willCallFreshsales: true
 });
+
+function reportFields(
+  groupFields: Array<{ field: FreshsalesFieldDefinition }>,
+  metricFields: Array<{ fieldDef?: FreshsalesFieldDefinition }>
+): string[] {
+  return Array.from(new Set([
+    "id",
+    ...groupFields.map(group => group.field.name),
+    ...metricFields.map(metric => metric.fieldDef?.name).filter((field): field is string => Boolean(field))
+  ]));
+}
 
 function bucketValue(record: Record<string, unknown>, field: FreshsalesFieldDefinition, bucket?: "day" | "week" | "month" | "quarter"): unknown {
   const raw = displayValueForReport(record, field);

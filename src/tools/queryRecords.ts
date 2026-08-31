@@ -77,7 +77,8 @@ export const queryRecordsTool = defineTool({
       ? params.groups.reduce((sum, group) => sum + Math.max(group.conditions.length, 1), 0)
       : 1;
     const enrich = (params.includeNotes || params.includeLinked) ? params.perPage : 0;
-    return nativeGroups + enrich + (isFieldSchemaCacheMiss(ctx, params.entity) ? 1 : 0);
+    const detailHydration = params.groups.some(group => group.conditions.length > 0) ? params.perPage : 0;
+    return nativeGroups + enrich + detailHydration + (isFieldSchemaCacheMiss(ctx, params.entity) ? 1 : 0);
   },
   async execute(params, ctx) {
     return {

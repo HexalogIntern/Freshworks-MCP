@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { amountFromDeal, getPrimaryRecord, linkedAccountFromDeal, linkedContactFromDeal, ownerNameFromRecord, stageNameFromDeal } from "../freshsales/mappers.js";
+import { dynamicRecordFromSchema, fetchFieldSchema, isFieldSchemaCacheMiss } from "../freshsales/fieldSchema.js";
 import { approvalFields, defineTool } from "./common.js";
 
 const schema = z
@@ -27,10 +28,11 @@ export const getDealTool = defineTool({
 
     return { id: input.id };
   },
-  estimateCallCount() {
-    return 1;
+  estimateCallCount(_params, ctx) {
+    return 1 + (isFieldSchemaCacheMiss(ctx, "deals") ? 1 : 0);
   },
   async execute(params, ctx) {
+    const fieldSchema = await fetchFieldSchema(ctx, "deals");
     const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/deals/${params.id}`, {
       query: {
         include: "owner,sales_account,contacts,deal_stage"
@@ -41,6 +43,7 @@ export const getDealTool = defineTool({
 
     return {
       data: {
+        ...dynamicRecordFromSchema(deal, fieldSchema),
         id: deal.id ?? null,
         name: deal.name ?? null,
         amount: amountFromDeal(deal),

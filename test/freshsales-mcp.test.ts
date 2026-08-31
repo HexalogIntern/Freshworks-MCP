@@ -14,8 +14,12 @@ import { contactsSummaryTool } from "../src/tools/contactsSummary.js";
 import { countContactsTool } from "../src/tools/countRecords.js";
 import { discoverFieldsTool } from "../src/tools/discoverFields.js";
 import { discoverViewsTool } from "../src/tools/discoverViews.js";
+import { exportRecordsTool } from "../src/tools/exportRecords.js";
+import { getDealTool } from "../src/tools/getDeal.js";
 import { listContactsTool } from "../src/tools/listContacts.js";
 import { listDealsTool } from "../src/tools/listDeals.js";
+import { queryRecordsTool } from "../src/tools/queryRecords.js";
+import { runReportTool } from "../src/tools/runReport.js";
 import { searchContactsTool } from "../src/tools/searchContacts.js";
 import { runTool, type ToolExecutionContext } from "../src/tools/common.js";
 import type { Logger } from "../src/types.js";
@@ -1332,6 +1336,271 @@ describe("deal tools", () => {
       filters_applied: {
         view: "Paid_meta"
       }
+    });
+  });
+
+  it("hydrates and resolves missing dropdown fields from partial native deal rows", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/deals/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "name", label: "Name" },
+            {
+              name: "deal_pipeline_id",
+              label: "Pipeline",
+              type: "dropdown",
+              choices: [{ id: 402000244153, value: "Hexalog - Pipeline" }]
+            },
+            {
+              name: "deal_stage_id",
+              label: "Deal stage",
+              type: "dropdown",
+              choices: [{ id: 402001711624, value: "Qualification" }]
+            },
+            {
+              name: "lead_source_id",
+              label: "Source",
+              type: "dropdown",
+              choices: [{ id: 402003408927, value: "Email" }]
+            }
+          ]
+        } as T;
+      }
+
+      if (path === "api/deals/402012131080") {
+        return {
+          deal: {
+            id: 402012131080,
+            name: "Ecomine",
+            deal_pipeline_id: 402000244153,
+            deal_stage_id: 402001711624,
+            lead_source_id: 402003408927
+          }
+        } as T;
+      }
+
+      return { deal: {} } as T;
+    });
+    const post = vi.fn(async <T>() => ({
+      deals: [{ id: 402012131080, name: "Ecomine" }],
+      meta: { total: 29 }
+    }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(queryRecordsTool, {
+      entity: "deals",
+      filters: [
+        { field: "deal_pipeline_id", operator: "is", value: "Hexalog - Pipeline" },
+        { field: "deal_stage_id", operator: "is", value: "Qualification" }
+      ],
+      fields: ["lead_source_id", "deal_stage_id", "deal_pipeline_id"],
+      per_page: 1
+    }, ctx);
+    const approve = await runTool(queryRecordsTool, {
+      approved: true,
+      request_id: requestIdFrom(propose),
+      entity: "deals"
+    }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(post).toHaveBeenCalledWith("api/filtered_search/deal", {
+      body: {
+        filter_rule: [
+          { attribute: "deal_pipeline_id", operator: "is_in", value: "402000244153" },
+          { attribute: "deal_stage_id", operator: "is_in", value: "402001711624" }
+        ],
+        page: 1,
+        per_page: 1
+      }
+    });
+    expect(get).toHaveBeenCalledWith("api/deals/402012131080", {
+      query: { include: "source,deal_stage" }
+    });
+    expect(approve.payload).toMatchObject({
+      records: [{
+        id: 402012131080,
+        lead_source_id: "Email",
+        deal_stage_id: "Qualification",
+        deal_pipeline_id: "Hexalog - Pipeline"
+      }],
+      total: 29
+    });
+  });
+
+  it("resolves dropdown fields on get_deal from the shared field schema", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/deals/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "name", label: "Name" },
+            {
+              name: "deal_pipeline_id",
+              label: "Pipeline",
+              type: "dropdown",
+              choices: [{ id: 402000244153, value: "Hexalog - Pipeline" }]
+            },
+            {
+              name: "deal_stage_id",
+              label: "Deal stage",
+              type: "dropdown",
+              choices: [{ id: 402001711624, value: "Qualification" }]
+            },
+            {
+              name: "lead_source_id",
+              label: "Source",
+              type: "dropdown",
+              choices: [{ id: 402003408927, value: "Email" }]
+            }
+          ]
+        } as T;
+      }
+
+      return {
+        deal: {
+          id: 402012131080,
+          name: "Ecomine",
+          amount: "1200",
+          deal_pipeline_id: 402000244153,
+          deal_stage_id: 402001711624,
+          lead_source_id: 402003408927
+        }
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(getDealTool, { id: "402012131080" }, ctx);
+    const approve = await runTool(getDealTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      data: {
+        id: 402012131080,
+        lead_source_id: "Email",
+        deal_stage_id: "Qualification",
+        deal_pipeline_id: "Hexalog - Pipeline"
+      }
+    });
+  });
+
+  it("translates created_at range filters to Freshsales date operators", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/deals/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "name", label: "Name" },
+            { name: "created_at", label: "Created at", type: "date" }
+          ]
+        } as T;
+      }
+
+      return { deal: {} } as T;
+    });
+    const post = vi.fn(async <T>() => ({
+      deals: [
+        { id: 1, name: "Week A", created_at: "2026-08-24T10:00:00Z" },
+        { id: 2, name: "Week A", created_at: "2026-08-25T10:00:00Z" }
+      ],
+      meta: { total: 2 }
+    }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(exportRecordsTool, {
+      entity: "deals",
+      filters: [{ field: "created_at", operator: "between", value: ["2026-08-24", "2026-08-30"] }],
+      fields: ["id", "created_at"],
+      per_page: 100
+    }, ctx);
+    const approve = await runTool(exportRecordsTool, {
+      approved: true,
+      request_id: requestIdFrom(propose),
+      entity: "deals",
+      fields: ["id"]
+    }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(post).toHaveBeenCalledWith("api/filtered_search/deal", {
+      body: {
+        filter_rule: [{ attribute: "created_at", operator: "is_in_the_range", value: ["2026-08-24", "2026-08-30"] }],
+        page: 1,
+        per_page: 100
+      }
+    });
+    expect(approve.payload).toMatchObject({
+      total: 2,
+      data: [
+        { id: 1, created_at: "2026-08-24T10:00:00Z" },
+        { id: 2, created_at: "2026-08-25T10:00:00Z" }
+      ]
+    });
+  });
+
+  it("lets run_report bucket rows returned by a created_at native date filter", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/deals/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "created_at", label: "Created at", type: "date" }
+          ]
+        } as T;
+      }
+
+      return { deal: {} } as T;
+    });
+    const post = vi.fn(async <T>() => ({
+      deals: [
+        { id: 1, created_at: "2026-08-24T10:00:00Z" },
+        { id: 2, created_at: "2026-08-25T10:00:00Z" }
+      ],
+      meta: { total: 2 }
+    }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(runReportTool, {
+      entity: "deals",
+      filters: [{ field: "created_at", operator: "after", value: "2026-01-01" }],
+      group_by: [{ field: "created_at", bucket: "week" }],
+      metrics: [{ op: "count" }],
+      limit: 100
+    }, ctx);
+    const approve = await runTool(runReportTool, {
+      approved: true,
+      request_id: requestIdFrom(propose),
+      entity: "deals"
+    }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(post).toHaveBeenCalledWith("api/filtered_search/deal", {
+      body: {
+        filter_rule: [{ attribute: "created_at", operator: "is_after", value: "2026-01-01" }],
+        page: 1,
+        per_page: 100
+      }
+    });
+    expect(approve.payload).toMatchObject({
+      total_rows_sampled: 2,
+      data: [{
+        group: { created_at: "2026-08-23" },
+        metrics: { count: 2 }
+      }]
     });
   });
 

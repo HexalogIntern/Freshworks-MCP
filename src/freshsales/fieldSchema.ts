@@ -91,10 +91,9 @@ export function dynamicRecordFromSchema(
   fields: FreshsalesFieldDefinition[]
 ): Record<string, unknown> {
   const output: Record<string, unknown> = {};
-  const customField = asRecord(record.custom_field);
 
   for (const field of fields) {
-    output[field.name] = resolveFieldValue(record, customField, field.name);
+    output[field.name] = outputValueForField(record, field);
   }
 
   return output;
@@ -161,6 +160,23 @@ export function mergeIncludes(...includeGroups: Array<string | null | undefined>
 
 export function fieldValueFor(record: Record<string, unknown>, field: FreshsalesFieldDefinition): unknown {
   return resolveFieldValue(record, asRecord(record.custom_field), field.name);
+}
+
+export function hasFieldValueFor(record: Record<string, unknown>, field: FreshsalesFieldDefinition): boolean {
+  return hasRawField(record, asRecord(record.custom_field), field.name);
+}
+
+export function outputValueForField(record: Record<string, unknown>, field: FreshsalesFieldDefinition): unknown {
+  const raw = fieldValueFor(record, field);
+  if (Array.isArray(raw)) {
+    return raw.map(value => choiceDisplayValue(field, value));
+  }
+
+  if (raw !== undefined && raw !== null && String(raw).trim() !== "") {
+    return choiceDisplayValue(field, raw);
+  }
+
+  return relationDisplayValue(record, field);
 }
 
 export function relationDisplayValue(record: Record<string, unknown>, field: FreshsalesFieldDefinition): unknown {
@@ -235,6 +251,10 @@ export function choiceDisplayValue(field: FreshsalesFieldDefinition, rawValue: u
   }
 
   const raw = String(rawValue);
+  if (field.choiceIdByLabel?.[normalizeAliasKey(raw)]) {
+    return rawValue;
+  }
+
   return field.choiceLabelById?.[raw] ?? (Object.keys(field.choiceLabelById ?? {}).length > 0 ? `Unresolved (id: ${raw})` : rawValue);
 }
 
@@ -252,6 +272,15 @@ function resolveFieldValue(
   }
 
   return null;
+}
+
+function hasRawField(
+  record: Record<string, unknown>,
+  customField: Record<string, unknown>,
+  fieldName: string
+): boolean {
+  return Object.prototype.hasOwnProperty.call(record, fieldName)
+    || Object.prototype.hasOwnProperty.call(customField, fieldName);
 }
 
 function normalizeFieldDefinition(value: unknown): FreshsalesFieldDefinition | null {

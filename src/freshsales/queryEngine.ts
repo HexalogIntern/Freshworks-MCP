@@ -4,6 +4,7 @@ import {
   dynamicRecordFromSchema,
   fetchFieldSchema,
   fieldValueFor,
+  hasFieldValueFor,
   isChoiceBackedField,
   mergeIncludes,
   relationIncludeForField,
@@ -117,8 +118,9 @@ export async function queryRecords(
       ? await getEntityPage(ctx, options.entity, options.page, options.perPage, include)
       : null;
     const raw = payload ? getCollection(payload as Record<string, unknown>, collectionKey(options.entity)) : unfiltered?.records ?? [];
+    const completeRaw = payload ? await hydrateMissingFields(ctx, options, schema, raw) : raw;
     const total = payload ? numericTotal(payload.meta?.total) : null;
-    const filtered = applyClientSideSearch(raw, schema, options.query);
+    const filtered = applyClientSideSearch(completeRaw, schema, options.query);
     const enriched = await enrichRecords(ctx, options, schema, filtered);
 
     return {
@@ -155,7 +157,8 @@ export async function queryRecords(
   }
 
   const raw = Array.from(byId.values()).slice((options.page - 1) * options.perPage, options.page * options.perPage);
-  const filtered = applyClientSideSearch(raw, schema, options.query);
+  const completeRaw = await hydrateMissingFields(ctx, options, schema, raw);
+  const filtered = applyClientSideSearch(completeRaw, schema, options.query);
   const enriched = await enrichRecords(ctx, options, schema, filtered);
 
   return {
@@ -230,6 +233,10 @@ function resolveValue(field: FreshsalesFieldDefinition, operator: QueryOperator,
     throw new AppError("MISSING_FILTER_VALUE", `${operator} requires a value for ${field.name}.`);
   }
   const values = Array.isArray(value) ? value : [value];
+  if (operator === "between" && values.length !== 2) {
+    throw new AppError("INVALID_FILTER_VALUE", `between requires exactly two values for ${field.name}.`);
+  }
+
   const resolved = isChoiceBackedField(field)
     ? values.map(item => resolveChoiceValueForField(field, String(item)))
     : values;
@@ -239,12 +246,25 @@ function resolveValue(field: FreshsalesFieldDefinition, operator: QueryOperator,
 function nativeRule(field: FreshsalesFieldDefinition, operator: QueryOperator, value: unknown): Record<string, unknown> {
   return {
     attribute: field.name,
-    operator: nativeOperator(operator),
+    operator: nativeOperator(field, operator),
     value
   };
 }
 
-function nativeOperator(operator: QueryOperator): string {
+function nativeOperator(field: FreshsalesFieldDefinition, operator: QueryOperator): string {
+  if (field.type?.toLowerCase() === "date") {
+    const dateMap: Partial<Record<QueryOperator, string>> = {
+      after: "is_after",
+      before: "is_before",
+      between: "is_in_the_range",
+      is: "is_in",
+      equals: "is_in",
+      is_null: "is_empty",
+      is_not_null: "is_not_empty"
+    };
+    return dateMap[operator] ?? operator;
+  }
+
   const map: Partial<Record<QueryOperator, string>> = {
     is: "is_in",
     equals: "is_in",
@@ -290,6 +310,61 @@ async function getEntityPage(ctx: ToolExecutionContext, entity: FieldSchemaEntit
     query: { page, per_page: perPage, include }
   });
   return { records: getCollection(payload, collectionKey(entity)) };
+}
+
+async function hydrateMissingFields(
+  ctx: ToolExecutionContext,
+  options: QueryRecordsOptions,
+  schema: FreshsalesFieldDefinition[],
+  records: Array<Record<string, unknown>>
+): Promise<Array<Record<string, unknown>>> {
+  const fields = fieldsToEnsure(schema, options.fields);
+  if (fields.length === 0 || records.length === 0) {
+    return records;
+  }
+
+  const include = mergeIncludes(...fields.map(field => relationIncludeForField(field.name)));
+  return Promise.all(records.map(async record => {
+    if (!shouldHydrateRecord(record, fields)) {
+      return record;
+    }
+
+    const id = record.id;
+    if (id === undefined || id === null) {
+      return record;
+    }
+
+    const payload = await ctx.freshsales.get<Record<string, unknown>>(`api/${options.entity}/${id}`, {
+      query: include ? { include } : undefined
+    });
+    const detail = getPrimaryRecord(payload, options.entity === "contacts" ? "contact" : "deal");
+    return mergeRecordDetails(record, detail);
+  }));
+}
+
+function fieldsToEnsure(schema: FreshsalesFieldDefinition[], requested?: string[]): FreshsalesFieldDefinition[] {
+  if (requested && requested.length > 0) {
+    return requested
+      .filter(field => !isSyntheticOutputField(field))
+      .map(field => resolveFieldAlias(schema, field).apiField);
+  }
+
+  return schema.filter(field => isChoiceBackedField(field) || relationIncludeForField(field.name));
+}
+
+function shouldHydrateRecord(record: Record<string, unknown>, fields: FreshsalesFieldDefinition[]): boolean {
+  return fields.some(field => !hasFieldValueFor(record, field));
+}
+
+function mergeRecordDetails(record: Record<string, unknown>, detail: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...record,
+    ...detail,
+    custom_field: {
+      ...asRecord(record.custom_field),
+      ...asRecord(detail.custom_field)
+    }
+  };
 }
 
 async function enrichRecords(
@@ -344,7 +419,7 @@ function selectFields(records: Array<Record<string, unknown>>, schema: Freshsale
   if (!requested || requested.length === 0) {
     return records;
   }
-  const fields = requested.map(field => resolveFieldAlias(schema, field).apiField.name);
+  const fields = requested.map(field => outputFieldName(schema, field));
   return records.map(record => {
     const out: Record<string, unknown> = { id: record.id ?? null };
     for (const field of fields) {
@@ -352,6 +427,23 @@ function selectFields(records: Array<Record<string, unknown>>, schema: Freshsale
     }
     return out;
   });
+}
+
+function outputFieldName(schema: FreshsalesFieldDefinition[], requested: string): string {
+  if (isSyntheticOutputField(requested)) {
+    return normalizeSyntheticOutputField(requested);
+  }
+
+  return resolveFieldAlias(schema, requested).apiField.name;
+}
+
+function isSyntheticOutputField(requested: string): boolean {
+  const normalized = normalizeSyntheticOutputField(requested);
+  return normalized === "id" || normalized === "name";
+}
+
+function normalizeSyntheticOutputField(requested: string): string {
+  return requested.trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
 
 function toResolvedCondition(condition: ReturnType<typeof resolveCondition>): ResolvedCondition {
@@ -374,4 +466,8 @@ function collectionKey(entity: FieldSchemaEntity): "contacts" | "deals" {
 function numericTotal(value: unknown): number | null {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

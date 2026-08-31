@@ -41,7 +41,7 @@ export async function nativeFilteredSearch(
 
   const filterRule = conditions.map(condition => ({
     attribute: condition.field.name,
-    operator: operatorForMatchMode(condition.matchMode),
+    operator: operatorForMatchMode(condition.field, condition.matchMode),
     value: resolveFilterValueForField(condition.field, condition.value)
   }));
   const payload = await ctx.freshsales.post<NativeFilterPayload>(`api/filtered_search/${nativeEntityName(entity)}`, {
@@ -70,7 +70,11 @@ function collectionKey(entity: FieldSchemaEntity): "contacts" | "deals" {
   return entity === "contacts" ? "contacts" : "deals";
 }
 
-function operatorForMatchMode(matchMode: "exact" | "contains"): string {
+function operatorForMatchMode(field: FreshsalesFieldDefinition, matchMode: "exact" | "contains"): string {
+  if (field.type?.toLowerCase() === "date" && matchMode === "exact") {
+    return "is_in";
+  }
+
   return matchMode === "contains" ? "contains" : "is_in";
 }
 

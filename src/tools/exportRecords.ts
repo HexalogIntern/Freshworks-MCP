@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { queryRecords, type QueryConditionInput, type QueryGroupInput } from "../freshsales/queryEngine.js";
+import { isFieldSchemaCacheMiss } from "../freshsales/fieldSchema.js";
 import { approvalFields, defineTool } from "./common.js";
 
 const conditionSchema = z.object({
@@ -46,7 +47,11 @@ export const exportRecordsTool = defineTool({
     };
   },
   estimateCallCount(params, ctx) {
-    return 1 + (params.detectDuplicates && params.entity === "contacts" ? 1 : 0) + (ctx.config.fieldSchemaCacheTtlMs === 0 ? 1 : 0);
+    const detailHydration = params.groups.some(group => group.conditions.length > 0) ? params.perPage : 0;
+    return 1
+      + detailHydration
+      + (params.detectDuplicates && params.entity === "contacts" ? 1 : 0)
+      + (isFieldSchemaCacheMiss(ctx, params.entity) ? 1 : 0);
   },
   async execute(params, ctx) {
     const result = await queryRecords(ctx, {
