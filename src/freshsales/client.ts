@@ -65,7 +65,10 @@ export class FreshsalesClient implements FreshsalesClientLike {
 
     let attempt = 0;
     while (true) {
-      this.deps.usageTracker.recordCall(this.now());
+      this.deps.usageTracker.recordCall(this.now(), {
+        method,
+        path: redactPathForUsage(url)
+      });
 
       let response: Response;
       try {
@@ -245,6 +248,19 @@ function normalizeErrorMessage(value: unknown): unknown {
 
 function truncate(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
+function redactPathForUsage(url: URL): string {
+  return url.search ? `${url.pathname}?${redactSearchParams(url.searchParams)}` : url.pathname;
+}
+
+function redactSearchParams(searchParams: URLSearchParams): string {
+  const safe = new URLSearchParams();
+  for (const [key, value] of searchParams.entries()) {
+    safe.set(key, key.toLowerCase().includes("token") || key.toLowerCase().includes("key") ? "[REDACTED]" : value);
+  }
+
+  return safe.toString();
 }
 
 function parseRateLimitHeaders(headers: Headers): FreshsalesRateLimitSnapshot {

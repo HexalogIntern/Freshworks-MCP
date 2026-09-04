@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
+import { clearAnalyticsReportCache } from "../src/freshsales/analyticsReports.js";
 import { clearContactStatusCache, fetchContactStatusLookup } from "../src/freshsales/contactStatusCache.js";
 import { clearFieldSchemaCache, clearFieldSchemaMemoryCache } from "../src/freshsales/fieldSchema.js";
 import { scanView, scanViews } from "../src/freshsales/paginatedScan.js";
@@ -10,17 +11,20 @@ import { ApprovalStore } from "../src/state/approvalStore.js";
 import { DailyUsageTracker } from "../src/state/dailyUsageTracker.js";
 import type { FreshsalesClientLike } from "../src/freshsales/types.js";
 import { getContactTool } from "../src/tools/getContact.js";
+import { getAnalyticsReportTool } from "../src/tools/getAnalyticsReport.js";
 import { contactsSummaryTool } from "../src/tools/contactsSummary.js";
 import { countContactsTool } from "../src/tools/countRecords.js";
 import { discoverFieldsTool } from "../src/tools/discoverFields.js";
 import { discoverViewsTool } from "../src/tools/discoverViews.js";
 import { exportRecordsTool } from "../src/tools/exportRecords.js";
+import { generateCustomReportTool } from "../src/tools/generateCustomReport.js";
 import { getDealTool } from "../src/tools/getDeal.js";
 import { listContactsTool } from "../src/tools/listContacts.js";
 import { listDealsTool } from "../src/tools/listDeals.js";
 import { queryRecordsTool } from "../src/tools/queryRecords.js";
 import { runReportTool } from "../src/tools/runReport.js";
 import { searchContactsTool } from "../src/tools/searchContacts.js";
+import { usageStatusTool } from "../src/tools/usageStatus.js";
 import { runTool, type ToolExecutionContext } from "../src/tools/common.js";
 import type { Logger } from "../src/types.js";
 import { AppError, redactKnownSecrets } from "../src/utils/errors.js";
@@ -33,7 +37,9 @@ const logger: Logger = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   clearContactStatusCache();
+  clearAnalyticsReportCache();
   clearFieldSchemaCache();
   clearViewCaches();
 });
@@ -61,6 +67,10 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     dealsScanMaxPages: 10,
     dealsScanMaxViews: 15,
     fieldSchemaCacheTtlMs: 3600000,
+    analyticsReportCacheTtlMs: 3600000,
+    analyticsReportsPath: "api/reports",
+    analyticsReportExportPathTemplate: "api/reports/{report_id}/export",
+    analyticsExportStatusPathTemplate: "api/reports/exports/{export_id}",
     viewListCacheTtlMs: 3600000,
     viewFieldCoverageCacheTtlMs: 3600000,
     freshsalesRequestTimeoutMs: 10000,
@@ -843,6 +853,63 @@ describe("contact tools", () => {
     expect(get).toHaveBeenCalledTimes(1);
   });
 
+  it("uses one native filtered_search for contact source plus created_at date filters", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "created_at", label: "Created at", type: "date" },
+            {
+              name: "cf_source",
+              label: "Source",
+              type: "dropdown",
+              choices: [{ id: "paid", value: "paid_meta" }]
+            }
+          ]
+        } as T;
+      }
+
+      return { contact: {} } as T;
+    });
+    const post = vi.fn(async <T>() => ({
+      contacts: [{ id: 1, created_at: "2026-07-05T10:00:00Z", custom_field: { cf_source: "paid" } }],
+      meta: { total: 1 }
+    }) as T);
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(listContactsTool, {
+      source: "paid_meta",
+      date_from: "2026-07-01T00:00:00+05:30",
+      per_page: 10
+    }, ctx);
+    const approve = await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith("api/filtered_search/contact", {
+      body: {
+        filter_rule: [
+          { attribute: "cf_source", operator: "is_in", value: "paid" },
+          { attribute: "created_at", operator: "is_after", value: "2026-07-01T00:00:00+05:30" }
+        ],
+        page: 1,
+        per_page: 10,
+        sort: undefined,
+        sort_type: undefined
+      }
+    });
+    expect(approve.payload).toMatchObject({
+      total: 1,
+      native_filtered: true
+    });
+  });
+
   it("treats contact UI labels and API field names as identical filter inputs", async () => {
     const get = vi.fn(async <T>(path: string) => {
       if (path === "api/settings/contacts/fields") {
@@ -1129,7 +1196,7 @@ describe("contact tools", () => {
 
     expect(firstApprove.payload).toMatchObject({
       contacts: {
-        fields: [{ api_field: "cf_pain_statement", ui_label: "Remarks", type: "custom_text" }]
+        fields: [{ api_field: "cf_pain_statement", ui_label: "Remarks" }]
       }
     });
     expect(secondApprove.payload).toMatchObject(firstApprove.payload);
@@ -1547,6 +1614,61 @@ describe("deal tools", () => {
     });
   });
 
+  it("trims discover_fields choices by default and includes requested choices only", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            {
+              name: "cf_city",
+              label: "City",
+              type: "dropdown",
+              choices: [
+                { id: "hanoi", value: "Hanoi" },
+                { id: "delhi", value: "Delhi" }
+              ]
+            }
+          ]
+        } as T;
+      }
+
+      return { fields: [] } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const proposeDefault = await runTool(discoverFieldsTool, { entity: "contacts" }, ctx);
+    const approveDefault = await runTool(discoverFieldsTool, { approved: true, request_id: requestIdFrom(proposeDefault) }, ctx);
+    const proposeChoices = await runTool(discoverFieldsTool, { entity: "contacts", include_choices: ["City"] }, ctx);
+    const approveChoices = await runTool(discoverFieldsTool, { approved: true, request_id: requestIdFrom(proposeChoices) }, ctx);
+
+    expect(approveDefault.payload).toMatchObject({
+      contacts: {
+        fields: [
+          { api_field: "id", ui_label: "ID" },
+          { api_field: "cf_city", ui_label: "City" }
+        ]
+      }
+    });
+    expect(JSON.stringify(approveDefault.payload)).not.toContain("Hanoi");
+    expect(approveChoices.payload).toMatchObject({
+      contacts: {
+        fields: [
+          { api_field: "id", ui_label: "ID" },
+          {
+            api_field: "cf_city",
+            ui_label: "City",
+            choices: {
+              hanoi: "Hanoi",
+              delhi: "Delhi"
+            }
+          }
+        ]
+      }
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
   it("lets run_report bucket rows returned by a created_at native date filter", async () => {
     const get = vi.fn(async <T>(path: string) => {
       if (path === "api/settings/deals/fields") {
@@ -1601,6 +1723,411 @@ describe("deal tools", () => {
         group: { created_at: "2026-08-23" },
         metrics: { count: 2 }
       }]
+    });
+  });
+
+  it("uses native filtered_search counts for count-only dropdown run_report groups", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/deals/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            {
+              name: "deal_stage_id",
+              label: "Deal stage",
+              type: "dropdown",
+              choices: [
+                { id: "won", value: "Won" },
+                { id: "open", value: "Open" }
+              ]
+            },
+            {
+              name: "lead_source_id",
+              label: "Source",
+              type: "dropdown",
+              choices: [{ id: "email", value: "Email" }]
+            }
+          ]
+        } as T;
+      }
+
+      return { deal: {} } as T;
+    });
+    const post = vi.fn(async <T>(_path: string, options?: { body?: { filter_rule?: Array<Record<string, unknown>> } }) => {
+      const stageRule = options?.body?.filter_rule?.find(rule => rule.attribute === "deal_stage_id");
+      return {
+        deals: [],
+        meta: { total: stageRule?.value === "won" ? 7 : 3 }
+      } as T;
+    });
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(runReportTool, {
+      entity: "deals",
+      filters: [{ field: "Source", operator: "is", value: "Email" }],
+      group_by: [{ field: "Deal stage" }],
+      metrics: [{ op: "count" }]
+    }, ctx);
+    const approve = await runTool(runReportTool, { approved: true, request_id: requestIdFrom(propose), entity: "deals" }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post).toHaveBeenNthCalledWith(1, "api/filtered_search/deal", {
+      body: {
+        filter_rule: [
+          { attribute: "lead_source_id", operator: "is_in", value: "email" },
+          { attribute: "deal_stage_id", operator: "is_in", value: "won" }
+        ],
+        page: 1,
+        per_page: 1
+      }
+    });
+    expect(approve.payload).toMatchObject({
+      total_kind: "native_aggregation",
+      total_rows_sampled: 0,
+      aggregation_strategy: "filtered_search_count_per_group_value",
+      data: [
+        { group: { deal_stage_id: "Won" }, metrics: { count: 7 } },
+        { group: { deal_stage_id: "Open" }, metrics: { count: 3 } }
+      ]
+    });
+  });
+
+  it("generates a custom contacts report from description grouped by Source and Status", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "created_at", label: "Created at", type: "date" },
+            {
+              name: "cf_source",
+              label: "Source",
+              type: "dropdown",
+              choices: [
+                { id: "web", value: "Website" },
+                { id: "referral", value: "Referral" }
+              ]
+            },
+            { name: "contact_status_id", label: "Status" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: "new", name: "New" }, { id: "qualified", name: "Qualified" }] } as T;
+      }
+
+      return { contact: {} } as T;
+    });
+    const post = vi.fn(async <T>(_path: string, options?: { body?: { filter_rule?: Array<Record<string, unknown>> } }) => {
+      const rules = options?.body?.filter_rule ?? [];
+      const source = rules.find(rule => rule.attribute === "cf_source")?.value;
+      const status = rules.find(rule => rule.attribute === "contact_status_id")?.value;
+      const totalByGroup = new Map<string, number>([
+        ["web:new", 4],
+        ["web:qualified", 2],
+        ["referral:new", 1],
+        ["referral:qualified", 3]
+      ]);
+
+      return {
+        contacts: [],
+        meta: { total: totalByGroup.get(`${source}:${status}`) ?? 0 }
+      } as T;
+    });
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(generateCustomReportTool, {
+      description: "Since 1st July 12 am, how many contacts have been created grouped by Source and status"
+    }, ctx);
+    const approve = await runTool(generateCustomReportTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(post).toHaveBeenCalledTimes(4);
+    expect(post).toHaveBeenNthCalledWith(1, "api/filtered_search/contact", {
+      body: {
+        filter_rule: [
+          { attribute: "created_at", operator: "is_after", value: "2026-07-01T00:00:00.000Z" },
+          { attribute: "cf_source", operator: "is_in", value: "web" },
+          { attribute: "contact_status_id", operator: "is_in", value: "new" }
+        ],
+        page: 1,
+        per_page: 1
+      }
+    });
+    expect(approve.payload).toMatchObject({
+      custom_report: true,
+      interpreted_request: {
+        entity: "contacts",
+        filters: [{ field: "created_at", operator: "after", value: "2026-07-01T00:00:00.000Z" }],
+        group_by: [{ field: "Source" }, { field: "status" }],
+        metrics: [{ op: "count" }]
+      },
+      total_kind: "native_aggregation",
+      data: [
+        { group: { cf_source: "Website", contact_status_id: "New" }, metrics: { count: 4 } },
+        { group: { cf_source: "Website", contact_status_id: "Qualified" }, metrics: { count: 2 } },
+        { group: { cf_source: "Referral", contact_status_id: "New" }, metrics: { count: 1 } },
+        { group: { cf_source: "Referral", contact_status_id: "Qualified" }, metrics: { count: 3 } }
+      ]
+    });
+  });
+
+  it("limits native report grouping to explicitly filtered source choices", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            { name: "created_at", label: "Created at", type: "date" },
+            {
+              name: "cf_source",
+              label: "Source",
+              type: "dropdown",
+              choices: [
+                { id: "paid", value: "Paid Meta" },
+                { id: "web", value: "Web" },
+                { id: "other", value: "Other" }
+              ]
+            },
+            { name: "contact_status_id", label: "Status" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: "qualified", name: "CC Qualified" }] } as T;
+      }
+
+      return { contact: {} } as T;
+    });
+    const post = vi.fn(async <T>(_path: string, options?: { body?: { filter_rule?: Array<Record<string, unknown>> } }) => {
+      const source = options?.body?.filter_rule?.findLast(rule => rule.attribute === "cf_source")?.value;
+      return {
+        contacts: [],
+        meta: { total: source === "paid" ? 9 : 5 }
+      } as T;
+    });
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(runReportTool, {
+      entity: "contacts",
+      filters: [
+        { field: "created_at", operator: "after", value: "2026-07-01T00:00:00+05:30" },
+        { field: "Source", operator: "is_in", value: ["paid_meta", "web"] },
+        { field: "Status", operator: "is", value: "CC Qualified" }
+      ],
+      group_by: [{ field: "Source" }],
+      metrics: [{ op: "count" }]
+    }, ctx);
+    const approve = await runTool(runReportTool, { approved: true, request_id: requestIdFrom(propose), entity: "contacts" }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post).toHaveBeenNthCalledWith(1, "api/filtered_search/contact", {
+      body: {
+        filter_rule: [
+          { attribute: "created_at", operator: "is_after", value: "2026-07-01T00:00:00+05:30" },
+          { attribute: "cf_source", operator: "is_in", value: ["paid", "web"] },
+          { attribute: "contact_status_id", operator: "is_in", value: "qualified" },
+          { attribute: "cf_source", operator: "is_in", value: "paid" }
+        ],
+        page: 1,
+        per_page: 1
+      }
+    });
+    expect(approve.payload).toMatchObject({
+      total_kind: "native_aggregation",
+      data: [
+        { group: { cf_source: "Paid Meta" }, metrics: { count: 9 } },
+        { group: { cf_source: "Web" }, metrics: { count: 5 } }
+      ]
+    });
+  });
+
+  it("extracts source and status through aliases when contact field labels are missing", async () => {
+    const get = vi.fn(async <T>(path: string, options?: { query?: { include?: string } }) => {
+      if (path === "api/settings/contacts/fields") {
+        return {
+          fields: [
+            { name: "id", label: "ID" },
+            {
+              name: "cf_source",
+              type: "dropdown",
+              choices: [{ id: "web", value: "Website" }]
+            },
+            { name: "contact_status_id" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/selector/contact_statuses") {
+        return { contact_statuses: [{ id: "status-new", name: "New" }] } as T;
+      }
+
+      expect(options?.query?.include).toBe("owner,sales_account,sales_accounts");
+      return {
+        contacts: [{ id: 1, custom_field: { cf_source: "web" }, contact_status_id: "status-new" }]
+      } as T;
+    });
+    const ctx = makeContext({ freshsales: { get: get as unknown as FreshsalesClientLike["get"] } });
+
+    const propose = await runTool(queryRecordsTool, {
+      entity: "contacts",
+      fields: ["source", "status"],
+      per_page: 10
+    }, ctx);
+    const approve = await runTool(queryRecordsTool, { approved: true, request_id: requestIdFrom(propose), entity: "contacts" }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      records: [{ id: 1, cf_source: "Website", contact_status_id: "New" }]
+    });
+  });
+
+  it("surfaces per-tool call breakdown in usage_status", async () => {
+    const fetchImpl = vi.fn(async (url: URL) => {
+      return url.toString().includes("api/settings/contacts/fields")
+        ? Response.json({ fields: [{ name: "id", label: "ID" }, { name: "display_name", label: "Name" }] })
+        : Response.json({ contacts: [] });
+    });
+    const appConfig = config();
+    const usageTracker = new DailyUsageTracker(appConfig, new Date("2026-08-07T10:00:00.000Z"));
+    const freshsales = new FreshsalesClient({
+      config: appConfig,
+      usageTracker,
+      logger,
+      fetchImpl,
+      now: () => new Date("2026-08-07T10:00:00.000Z")
+    });
+    const ctx: ToolExecutionContext = {
+      config: appConfig,
+      freshsales,
+      approvalStore: new ApprovalStore(),
+      usageTracker,
+      logger,
+      now: () => new Date("2026-08-07T10:00:00.000Z")
+    };
+
+    const proposeList = await runTool(listContactsTool, { page: 1, per_page: 25 }, ctx);
+    await runTool(listContactsTool, { approved: true, request_id: requestIdFrom(proposeList) }, ctx);
+    const proposeUsage = await runTool(usageStatusTool, {}, ctx);
+    const usage = await runTool(usageStatusTool, { approved: true, request_id: requestIdFrom(proposeUsage) }, ctx);
+
+    expect(usage.payload).toMatchObject({
+      calls_used_today: 2,
+      calls_by_tool_today: [{ tool: "list_contacts", calls: 2 }],
+      recent_tool_invocations: [
+        expect.objectContaining({
+          tool: "list_contacts",
+          freshsales_call_count: 2,
+          freshsales_calls: expect.arrayContaining([
+            { method: "GET", path: "/api/settings/contacts/fields", calls: 1 },
+            { method: "GET", path: "/api/contacts/view/contact-view?page=1&per_page=25&include=owner%2Csales_account", calls: 1 }
+          ])
+        })
+      ]
+    });
+  });
+
+  it("extracts an Analytics report export to JSON rows and reuses the cached report name", async () => {
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/reports") {
+        return {
+          reports: [
+            { id: "report-q2", name: "Q2 leads - Alankrati" }
+          ]
+        } as T;
+      }
+
+      if (path === "api/reports/exports/export-1") {
+        return {
+          export: {
+            id: "export-1",
+            status: "completed",
+            csv_url: "https://files.example.com/report.csv"
+          }
+        } as T;
+      }
+
+      return {} as T;
+    });
+    const post = vi.fn(async <T>() => ({
+      export: {
+        id: "export-1",
+        status: "queued"
+      }
+    }) as T);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Name,Leads\nAlankrati,12\n", { status: 200 })));
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(getAnalyticsReportTool, { report_name: "q2 leads alankrati", timeout_ms: 1, poll_interval_ms: 250 }, ctx);
+    const approve = await runTool(getAnalyticsReportTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+    const secondPropose = await runTool(getAnalyticsReportTool, { report_name: "Q2 leads - Alankrati", timeout_ms: 1 }, ctx);
+    await runTool(getAnalyticsReportTool, { approved: true, request_id: requestIdFrom(secondPropose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      status: "completed",
+      report: { id: "report-q2", name: "Q2 leads - Alankrati" },
+      export_id: "export-1",
+      total_rows: 1,
+      data: [{ Name: "Alankrati", Leads: "12" }]
+    });
+    expect(get.mock.calls.filter(([path]) => path === "api/reports")).toHaveLength(1);
+  });
+
+  it("returns pending for Analytics exports that are not ready before timeout", async () => {
+    const post = vi.fn(async <T>() => ({
+      export: {
+        id: "export-pending",
+        status: "queued"
+      }
+    }) as T);
+    const get = vi.fn(async <T>(path: string) => {
+      if (path === "api/reports") {
+        return { reports: [{ id: "report-q2", name: "Q2 leads - Alankrati" }] } as T;
+      }
+
+      return { export: { id: "export-pending", status: "running" } } as T;
+    });
+    const ctx = makeContext({
+      freshsales: {
+        get: get as unknown as FreshsalesClientLike["get"],
+        post: post as unknown as FreshsalesClientLike["post"]
+      }
+    });
+
+    const propose = await runTool(getAnalyticsReportTool, { report_name: "Q2 leads - Alankrati", timeout_ms: 0 }, ctx);
+    const approve = await runTool(getAnalyticsReportTool, { approved: true, request_id: requestIdFrom(propose) }, ctx);
+
+    expect(approve.isError).toBe(false);
+    expect(approve.payload).toMatchObject({
+      status: "pending",
+      partial: true,
+      export_id: "export-pending",
+      export_status: "queued"
     });
   });
 

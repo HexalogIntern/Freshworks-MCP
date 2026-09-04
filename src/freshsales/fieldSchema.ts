@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { fetchContactStatusLookup } from "./contactStatusCache.js";
 import type { ToolExecutionContext } from "../tools/common.js";
 import { AppError } from "../utils/errors.js";
 
@@ -105,10 +106,12 @@ export function validateFieldName(fields: FreshsalesFieldDefinition[], requested
 
 export function resolveFieldAlias(fields: FreshsalesFieldDefinition[], requested: string): FieldAliasResolution {
   const trimmed = requested.trim();
+  const exactName = findFieldByName(fields, trimmed);
+  const exactLabel = fields.find(field => field.label && normalizeName(field.label) === normalizeName(trimmed));
+  const aliasField = exactName ?? exactLabel ?? resolveKnownAlias(fields, trimmed) ?? resolveDerivedAlias(fields, trimmed);
   const aliasMap = buildFieldAliasMap(fields);
-  const resolvedInput = aliasMap.get(normalizeAliasKey(trimmed)) ?? trimmed;
-  const normalized = normalizeName(resolvedInput);
-  const matched = fields.find(field => normalizeName(field.name) === normalized);
+  const resolvedInput = aliasField?.name ?? aliasMap.get(normalizeAliasKey(trimmed)) ?? trimmed;
+  const matched = aliasField ?? findFieldByName(fields, resolvedInput);
 
   if (matched) {
     return {
@@ -124,20 +127,68 @@ export function resolveFieldAlias(fields: FreshsalesFieldDefinition[], requested
   throw new AppError("UNKNOWN_FIELD", `Unknown Freshsales field: ${requested}.${suffix}`);
 }
 
-export function fieldMetadata(fields: FreshsalesFieldDefinition[]): Array<{
+export async function hydrateEntityChoiceLookups(
+  ctx: ToolExecutionContext,
+  entity: FieldSchemaEntity,
+  fields: FreshsalesFieldDefinition[],
+  requestedFields: string[] = []
+): Promise<void> {
+  if (entity !== "contacts") {
+    return;
+  }
+
+  const statusField = fields.find(field => field.name === "contact_status_id");
+  if (!statusField || Object.keys(statusField.choiceLabelById ?? {}).length > 0) {
+    return;
+  }
+
+  const shouldHydrate = requestedFields.length === 0
+    || requestedFields.some(field => {
+      const normalized = normalizeName(field);
+      return normalized === "status"
+        || normalized === "contactstatus"
+        || normalized === "contactstatusid"
+        || findFieldByName(fields, field)?.name === "contact_status_id"
+        || resolveKnownAlias(fields, field)?.name === "contact_status_id";
+    });
+  if (!shouldHydrate) {
+    return;
+  }
+
+  const lookup = await fetchContactStatusLookup(ctx);
+  const choiceLabelById = Object.fromEntries(lookup.idToName.entries());
+  statusField.choiceLabelById = choiceLabelById;
+  statusField.choiceIdByLabel = Object.fromEntries(
+    Array.from(lookup.idToName.entries()).map(([id, label]) => [normalizeAliasKey(label), id])
+  );
+  statusField.type = statusField.type ?? "dropdown";
+}
+
+export function fieldMetadata(fields: FreshsalesFieldDefinition[], options: { includeChoices?: string[] } = {}): Array<{
   api_field: string;
   ui_label: string | null;
-  type: string | null;
-  choices: Record<string, string> | null;
-  relation_include: string | null;
+  choices?: Record<string, string> | null;
 }> {
+  const choicesToInclude = new Set((options.includeChoices ?? []).map(normalizeAliasKey));
   return fields.map(field => ({
     api_field: field.name,
     ui_label: field.label ?? null,
-    type: field.type ?? null,
-    choices: field.choiceLabelById ?? null,
-    relation_include: relationIncludeForField(field.name)
+    ...(choicesToInclude.has(normalizeAliasKey(field.name)) || (field.label && choicesToInclude.has(normalizeAliasKey(field.label)))
+      ? { choices: field.choiceLabelById ?? null }
+      : {})
   }));
+}
+
+export function cachedFieldSchema(
+  ctx: ToolExecutionContext,
+  entity: FieldSchemaEntity
+): FreshsalesFieldDefinition[] | null {
+  const cached = cache.get(entity);
+  if (cached && Date.now() < cached.expiresAt && ctx.config.fieldSchemaCacheTtlMs !== 0) {
+    return cached.fields;
+  }
+
+  return null;
 }
 
 export function relationIncludeForField(fieldName: string): string | null {
@@ -213,7 +264,7 @@ export function fieldComparableValues(record: Record<string, unknown>, field: Fr
 
 export function resolveFilterValueForField(field: FreshsalesFieldDefinition, requested: string): string | number {
   const trimmed = requested.trim();
-  const choiceId = field.choiceIdByLabel?.[normalizeAliasKey(trimmed)];
+  const choiceId = field.choiceIdByLabel?.[normalizeAliasKey(trimmed)] ?? field.choiceIdByLabel?.[normalizeName(trimmed)];
   return choiceId ?? trimmed;
 }
 
@@ -226,7 +277,7 @@ export function isChoiceBackedField(field: FreshsalesFieldDefinition): boolean {
 
 export function resolveChoiceValueForField(field: FreshsalesFieldDefinition, requested: string): string | number {
   const trimmed = requested.trim();
-  const choiceId = field.choiceIdByLabel?.[normalizeAliasKey(trimmed)];
+  const choiceId = field.choiceIdByLabel?.[normalizeAliasKey(trimmed)] ?? field.choiceIdByLabel?.[normalizeName(trimmed)];
   if (choiceId) {
     return choiceId;
   }
@@ -295,7 +346,7 @@ function normalizeFieldDefinition(value: unknown): FreshsalesFieldDefinition | n
 
   return {
     id: record.id as string | number | undefined,
-    label: stringValue(record.label) ?? undefined,
+    label: fieldLabel(record) ?? undefined,
     name,
     type: stringValue(record.type) ?? undefined,
     default: typeof record.default === "boolean" ? record.default : undefined,
@@ -322,6 +373,7 @@ function buildChoiceMaps(choices: unknown[] | undefined): {
     if (id && label) {
       labelById[id] = label;
       idByLabel[normalizeAliasKey(label)] = id;
+      idByLabel[normalizeName(label)] = id;
     }
   }
 
@@ -346,6 +398,43 @@ function buildFieldAliasMap(fields: FreshsalesFieldDefinition[]): Map<string, st
   }
 
   return aliases;
+}
+
+function resolveKnownAlias(fields: FreshsalesFieldDefinition[], requested: string): FreshsalesFieldDefinition | null {
+  const normalized = normalizeName(requested);
+  const candidates = knownFieldAliases[normalized] ?? [];
+  for (const candidate of candidates) {
+    const field = findFieldByName(fields, candidate);
+    if (field) {
+      return field;
+    }
+  }
+
+  return null;
+}
+
+function resolveDerivedAlias(fields: FreshsalesFieldDefinition[], requested: string): FreshsalesFieldDefinition | null {
+  const normalized = normalizeName(requested);
+  const matches = fields.filter(field => {
+    const apiName = normalizeName(field.name);
+    return apiName === normalized
+      || (field.name.startsWith("cf_") && normalizeName(field.name.slice(3)) === normalized)
+      || (field.name.endsWith("_id") && normalizeName(field.name.slice(0, -3)) === normalized);
+  });
+
+  return matches.length === 1 ? matches[0] ?? null : null;
+}
+
+function findFieldByName(fields: FreshsalesFieldDefinition[], requested: string): FreshsalesFieldDefinition | null {
+  const normalized = normalizeName(requested);
+  return fields.find(field => normalizeName(field.name) === normalized) ?? null;
+}
+
+function fieldLabel(record: Record<string, unknown>): string | null {
+  return stringValue(record.label)
+    ?? stringValue(record.display_name)
+    ?? stringValue(record.field_label)
+    ?? stringValue(record.label_name);
 }
 
 function normalizeAliasKey(value: string): string {
@@ -436,3 +525,24 @@ const relationFieldIncludes = new Map<string, string>([
   ["deal_stage", "deal_stage"],
   ["contacts", "contacts"]
 ]);
+
+const knownFieldAliases: Record<string, string[]> = {
+  source: ["source", "cf_source", "lead_source_id"],
+  leadsource: ["lead_source_id", "source", "cf_source"],
+  status: ["contact_status_id", "status", "cf_status"],
+  contactstatus: ["contact_status_id", "status", "cf_status"],
+  created: ["created_at"],
+  createdat: ["created_at"],
+  owner: ["owner_id", "owner", "sales_owner_id"],
+  salesowner: ["owner_id", "sales_owner_id", "owner"],
+  account: ["sales_account_id", "sales_account", "sales_accounts"],
+  organisation: ["sales_account_id", "sales_account", "sales_accounts", "cf_organisation_name"],
+  organization: ["sales_account_id", "sales_account", "sales_accounts", "cf_organisation_name"],
+  stage: ["deal_stage_id", "deal_stage", "stage"],
+  dealstage: ["deal_stage_id", "deal_stage", "stage"],
+  pipeline: ["deal_pipeline_id", "pipeline"],
+  dealpipeline: ["deal_pipeline_id", "pipeline"],
+  dealvalue: ["amount", "deal_value", "cf_deal_value"],
+  value: ["amount", "deal_value", "cf_deal_value"],
+  amount: ["amount", "deal_value", "cf_deal_value"]
+};

@@ -5,8 +5,9 @@ import { AppError } from "../utils/errors.js";
 
 export interface NativeFilterCondition {
   field: FreshsalesFieldDefinition;
-  value: string;
+  value: string | number | boolean | Array<string | number | boolean>;
   matchMode: "exact" | "contains";
+  operator?: string;
 }
 
 export interface NativeFilterResult {
@@ -41,8 +42,10 @@ export async function nativeFilteredSearch(
 
   const filterRule = conditions.map(condition => ({
     attribute: condition.field.name,
-    operator: operatorForMatchMode(condition.field, condition.matchMode),
-    value: resolveFilterValueForField(condition.field, condition.value)
+    operator: condition.operator ?? operatorForMatchMode(condition.field, condition.matchMode),
+    value: Array.isArray(condition.value)
+      ? condition.value.map(value => resolveFilterValueForField(condition.field, String(value)))
+      : resolveFilterValueForField(condition.field, String(condition.value))
   }));
   const payload = await ctx.freshsales.post<NativeFilterPayload>(`api/filtered_search/${nativeEntityName(entity)}`, {
     body: {

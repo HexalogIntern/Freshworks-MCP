@@ -10,12 +10,14 @@ const schema = z
   .object({
     ...approvalFields,
     entity: entitySchema.default("both"),
+    include_choices: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
     refresh: z.boolean().default(false)
   })
   .strict();
 
 interface DiscoverFieldsParams {
   entity: "contacts" | "deals" | "both";
+  includeChoices: string[];
   refresh: boolean;
 }
 
@@ -28,6 +30,7 @@ export const discoverFieldsTool = defineTool({
   resolve(input): DiscoverFieldsParams {
     return {
       entity: input.entity,
+      includeChoices: input.include_choices,
       refresh: input.refresh
     };
   },
@@ -42,7 +45,7 @@ export const discoverFieldsTool = defineTool({
       const fields = await fetchFieldSchema(ctx, entity, { forceRefresh: params.refresh });
       result[entity] = {
         count: fields.length,
-        fields: fieldMetadata(fields)
+        fields: fieldMetadata(fields, { includeChoices: params.includeChoices })
       };
     }
 

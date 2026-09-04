@@ -5,6 +5,8 @@ import { countContactsTool, countDealsTool } from "./countRecords.js";
 import { discoverFieldsTool } from "./discoverFields.js";
 import { discoverViewsTool } from "./discoverViews.js";
 import { exportRecordsTool } from "./exportRecords.js";
+import { generateCustomReportTool } from "./generateCustomReport.js";
+import { getAnalyticsReportTool } from "./getAnalyticsReport.js";
 import { getContactTool } from "./getContact.js";
 import { getDealTool } from "./getDeal.js";
 import { listContactsTool } from "./listContacts.js";
@@ -21,7 +23,9 @@ export const toolDefinitions: Array<ToolDefinition<any, any, JsonRecord>> = [
   discoverViewsTool,
   listContactsTool,
   queryRecordsTool,
+  generateCustomReportTool,
   runReportTool,
+  getAnalyticsReportTool,
   exportRecordsTool,
   countContactsTool,
   getContactTool,

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { contactStatusNameForId, fetchContactStatusLookup, isContactStatusCacheMiss, type ContactStatusLookup } from "../freshsales/contactStatusCache.js";
 import { accountNameFromRecord, contactStatusFromRecord, emailFromRecord, getCollection, getPrimaryRecord, nameFromRecord, ownerNameFromRecord, salesAccountsFromRecord, tagNamesFromRecord } from "../freshsales/mappers.js";
-import { nativeFilteredSearch } from "../freshsales/nativeFilter.js";
+import { nativeFilteredSearch, type NativeFilterCondition } from "../freshsales/nativeFilter.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldComparableValues, isFieldSchemaCacheMiss, mergeIncludes, relationDisplayValue, relationIncludeForField, resolveFieldAlias, validateFieldName, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { cachedViewsForFilter } from "../freshsales/viewCache.js";
@@ -148,6 +148,7 @@ export const listContactsTool = defineTool({
     const filterResolution = params.filterBy ? resolveFieldAlias(fieldSchema, params.filterBy) : undefined;
     const filterField = filterResolution?.apiField;
     const sourceField = params.source ? validateFieldName(fieldSchema, "source") : undefined;
+    const createdAtField = (params.dateFrom || params.dateTo) ? validateFieldName(fieldSchema, "created_at") : undefined;
     const sortResolution = params.sortBy ? resolveFieldAlias(fieldSchema, params.sortBy) : undefined;
     const sortField = sortResolution?.apiField;
     const contactStatusLookup = filterField?.name === "contact_status_id" || sortField?.name === "contact_status_id"
@@ -177,7 +178,10 @@ export const listContactsTool = defineTool({
         filterField,
         filterValue: params.filterValue,
         matchMode: params.matchMode,
-        contactStatusLookup
+        contactStatusLookup,
+        createdAtField,
+        dateFrom: params.dateFrom,
+        dateTo: params.dateTo
       }), {
         page: params.page,
         perPage: params.perPage,
@@ -294,14 +298,12 @@ function shouldScanAllViews(params: ListContactsParams): boolean {
 }
 
 function canUseNativeFilter(params: ListContactsParams): boolean {
-  return Boolean((params.source || params.filterBy) && !params.owner && !params.dateFrom && !params.dateTo);
+  return Boolean((params.source || params.filterBy || params.dateFrom || params.dateTo) && !params.owner);
 }
 
 function unsupportedNativeContactFilter(params: ListContactsParams): never {
   const unsupported = [
-    params.owner ? "owner" : null,
-    params.dateFrom ? "date_from" : null,
-    params.dateTo ? "date_to" : null
+    params.owner ? "owner" : null
   ].filter(Boolean).join(", ");
   throw new AppError(
     "UNSUPPORTED_NATIVE_FILTER",
@@ -316,8 +318,11 @@ function nativeContactConditions(filters: {
   filterValue?: string;
   matchMode: "exact" | "contains";
   contactStatusLookup?: ContactStatusLookup;
+  createdAtField?: FreshsalesFieldDefinition;
+  dateFrom?: string;
+  dateTo?: string;
 }) {
-  const conditions = [];
+  const conditions: NativeFilterCondition[] = [];
   if (filters.sourceField && filters.source) {
     conditions.push({ field: filters.sourceField, value: filters.source, matchMode: filters.matchMode });
   }
@@ -331,6 +336,14 @@ function nativeContactConditions(filters: {
       ? contactStatusIdForName(filters.contactStatusLookup, filters.filterValue) ?? filters.filterValue
       : filters.filterValue;
     conditions.push({ field: filters.filterField, value: filterValue, matchMode: filters.matchMode });
+  }
+
+  if (filters.createdAtField && filters.dateFrom) {
+    conditions.push({ field: filters.createdAtField, value: filters.dateFrom, matchMode: "exact", operator: "is_after" });
+  }
+
+  if (filters.createdAtField && filters.dateTo) {
+    conditions.push({ field: filters.createdAtField, value: filters.dateTo, matchMode: "exact", operator: "is_before" });
   }
 
   return conditions;

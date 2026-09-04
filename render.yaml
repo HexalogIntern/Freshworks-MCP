@@ -36,7 +36,7 @@ services:
       - key: FRESHSALES_MAX_RETRY_WAIT_MS
         value: "2000"
       - key: LOCAL_RATE_LIMIT_PER_MINUTE
-        value: "60"
+        value: "600"
       - key: PIPELINE_SUMMARY_MAX_PAGES
         value: "5"
       - key: CONTACTS_SCAN_MAX_PAGES
@@ -44,4 +44,12 @@ services:
       - key: DEALS_SCAN_MAX_PAGES
         value: "10"
       - key: FIELD_SCHEMA_CACHE_TTL_MS
-        value: "3600000"
+        value: "86400000"
+      - key: ANALYTICS_REPORT_CACHE_TTL_MS
+        value: "86400000"
+      - key: FRESHSALES_ANALYTICS_REPORTS_PATH
+        value: api/reports
+      - key: FRESHSALES_ANALYTICS_REPORT_EXPORT_PATH_TEMPLATE
+        value: api/reports/{report_id}/export
+      - key: FRESHSALES_ANALYTICS_EXPORT_STATUS_PATH_TEMPLATE
+        value: api/reports/exports/{export_id}

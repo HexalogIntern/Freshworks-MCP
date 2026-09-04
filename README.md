@@ -7,7 +7,9 @@ Read-only MCP server for live Freshsales CRM access from Claude. Every tool uses
 - `discover_views(entity, sample_pages_per_view)`
 - `list_contacts(view, source, filter_by, filter_value, match_mode, owner, date_from, date_to, page, per_page)`
 - `query_records(entity, filters, filter_groups, query, include_notes, include_linked, fields, page, per_page)`
-- `run_report(entity, filters, group_by, metrics, sort_by, limit)`
+- `generate_custom_report(entity, description, metrics, group_by, filters, date_from, date_to, limit, max_group_values)`
+- `run_report(entity, filters, group_by, metrics, sort_by, limit, max_group_values)`
+- `get_analytics_report(report_name, report_id, export_id, timeout_ms, poll_interval_ms, max_rows)`
 - `export_records(entity, filters, fields, cursor, per_page, detect_duplicates)`
 - `get_contact(id)`
 - `list_deals(stage, view, filter_by, filter_value, match_mode, owner, date_from, date_to, page, per_page)`
@@ -16,6 +18,20 @@ Read-only MCP server for live Freshsales CRM access from Claude. Every tool uses
 - `list_notes(entity_type, entity_id)`
 - `pipeline_summary(group_by)`
 - `usage_status()`
+
+### Behavior Changes
+
+`run_report` now uses Freshsales `filtered_search` totals for count-only reports grouped by one or two dropdown fields. This returns exact counts with one Freshsales count request per grouped dropdown value and sets `total_kind: "native_aggregation"` with `aggregation_strategy: "filtered_search_count_per_group_value"`. Reports with non-count metrics, date buckets, or non-dropdown groupings keep the paginated fallback and return `aggregation_strategy: "paginated_client_aggregation"`.
+
+`generate_custom_report` accepts natural-language report requests plus optional structured overrides. For example, `"Since 1st July 12 am, how many contacts have been created grouped by Source and status"` is translated into a `created_at` date filter, `Source`/`Status` groupings, and a count metric. It returns the interpreted `run_report` request with the generated data; it does not create saved reports inside the Freshsales UI.
+
+Field resolution now includes common Freshsales aliases such as `source`, `status`, `created`, `stage`, `pipeline`, `owner`, and `deal value`, and can infer custom API names like `cf_source` from the user-facing label. Contact `Status` values are hydrated from Freshsales contact status selector metadata when the field schema does not include choices directly.
+
+API calls are compacted for common query shapes: contact status metadata tries the selector endpoint first, `list_contacts` uses native Freshsales filters for `source`/`filter_by` plus `date_from`/`date_to`, `list_deals` uses native filters for field/date combinations without owner/stage matching, and `run_report` only enumerates explicitly filtered group values when possible.
+
+`discover_fields` now returns only `api_field` and `ui_label` by default. Pass `include_choices: ["Field label or api_field"]` to include dropdown choices for specific fields.
+
+Every approved tool result now includes `_meta.freshsales_call_count` and `_meta.freshsales_calls`; `usage_status` also includes per-tool totals and recent call/invocation breakdowns.
 
 ### View Discovery and Filter Performance
 
@@ -40,13 +56,17 @@ Copy `.env.example` to `.env` locally and set:
 - `MCP_ALLOWED_HOSTS`: Comma-separated allowed hostnames for DNS rebinding protection.
 - `FRESHSALES_MAX_429_RETRIES`: 429 retry count, default `1`.
 - `FRESHSALES_MAX_RETRY_WAIT_MS`: Max retry wait, default `2000`.
-- `LOCAL_RATE_LIMIT_PER_MINUTE`: Local per-minute safety cap, default `60`.
+- `LOCAL_RATE_LIMIT_PER_MINUTE`: Local rolling per-minute safety cap, default `600`.
 - `PIPELINE_SUMMARY_MAX_PAGES`: Max deal pages scanned by `pipeline_summary`, default `5`.
 - `CONTACTS_SCAN_MAX_PAGES`: Max pages scanned per contacts view for filtered contact queries, default `10`.
 - `CONTACTS_SCAN_MAX_VIEWS`: Max contact views scanned during a broad filtered contact search, default `15`.
 - `DEALS_SCAN_MAX_PAGES`: Max pages scanned per deals view for filtered deal queries, default `10`.
 - `DEALS_SCAN_MAX_VIEWS`: Max deal views scanned during a broad filtered deal search, default `15`.
-- `FIELD_SCHEMA_CACHE_TTL_MS`: In-memory Freshsales field metadata cache TTL in milliseconds, default `3600000`.
+- `FIELD_SCHEMA_CACHE_TTL_MS`: Freshsales field metadata cache TTL in milliseconds, persisted under the system temp directory, default `86400000`.
+- `ANALYTICS_REPORT_CACHE_TTL_MS`: Freshsales Analytics saved report cache TTL in milliseconds, persisted under the system temp directory, default `86400000`.
+- `FRESHSALES_ANALYTICS_REPORTS_PATH`: Analytics report-list endpoint path, default `api/reports`.
+- `FRESHSALES_ANALYTICS_REPORT_EXPORT_PATH_TEMPLATE`: One-time Analytics export trigger path. Use `{report_id}` as the placeholder, default `api/reports/{report_id}/export`.
+- `FRESHSALES_ANALYTICS_EXPORT_STATUS_PATH_TEMPLATE`: Analytics export status path. Use `{export_id}` as the placeholder, default `api/reports/exports/{export_id}`.
 - `VIEW_LIST_CACHE_TTL_MS`: In-memory saved-view list cache TTL in milliseconds, default `3600000`.
 - `VIEW_FIELD_COVERAGE_CACHE_TTL_MS`: In-memory view field/value coverage cache TTL in milliseconds, default `3600000`.
 - `FRESHSALES_REQUEST_TIMEOUT_MS`: Freshsales upstream request timeout in milliseconds, default `10000`.

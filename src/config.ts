@@ -24,13 +24,17 @@ const envSchema = z.object({
   MCP_ALLOWED_HOSTS: z.string().default(""),
   FRESHSALES_MAX_429_RETRIES: z.coerce.number().int().min(0).max(3).default(1),
   FRESHSALES_MAX_RETRY_WAIT_MS: z.coerce.number().int().min(100).max(5000).default(2000),
-  LOCAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(60),
+  LOCAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(600),
   PIPELINE_SUMMARY_MAX_PAGES: z.coerce.number().int().min(1).max(10).default(5),
   CONTACTS_SCAN_MAX_PAGES: z.coerce.number().int().min(1).max(20).default(10),
   CONTACTS_SCAN_MAX_VIEWS: z.coerce.number().int().min(1).max(50).default(15),
   DEALS_SCAN_MAX_PAGES: z.coerce.number().int().min(1).max(20).default(10),
   DEALS_SCAN_MAX_VIEWS: z.coerce.number().int().min(1).max(50).default(15),
-  FIELD_SCHEMA_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600000),
+  FIELD_SCHEMA_CACHE_TTL_MS: z.coerce.number().int().min(0).default(86400000),
+  ANALYTICS_REPORT_CACHE_TTL_MS: z.coerce.number().int().min(0).default(86400000),
+  FRESHSALES_ANALYTICS_REPORTS_PATH: z.string().trim().min(1).default("api/reports"),
+  FRESHSALES_ANALYTICS_REPORT_EXPORT_PATH_TEMPLATE: z.string().trim().min(1).default("api/reports/{report_id}/export"),
+  FRESHSALES_ANALYTICS_EXPORT_STATUS_PATH_TEMPLATE: z.string().trim().min(1).default("api/reports/exports/{export_id}"),
   VIEW_LIST_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600000),
   VIEW_FIELD_COVERAGE_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600000),
   FRESHSALES_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
@@ -70,6 +74,10 @@ export interface AppConfig {
   dealsScanMaxPages: number;
   dealsScanMaxViews: number;
   fieldSchemaCacheTtlMs: number;
+  analyticsReportCacheTtlMs: number;
+  analyticsReportsPath: string;
+  analyticsReportExportPathTemplate: string;
+  analyticsExportStatusPathTemplate: string;
   viewListCacheTtlMs: number;
   viewFieldCoverageCacheTtlMs: number;
   freshsalesRequestTimeoutMs: number;
@@ -108,6 +116,10 @@ export function getConfig(): AppConfig {
     dealsScanMaxPages: env.DEALS_SCAN_MAX_PAGES,
     dealsScanMaxViews: env.DEALS_SCAN_MAX_VIEWS,
     fieldSchemaCacheTtlMs: env.FIELD_SCHEMA_CACHE_TTL_MS,
+    analyticsReportCacheTtlMs: env.ANALYTICS_REPORT_CACHE_TTL_MS,
+    analyticsReportsPath: env.FRESHSALES_ANALYTICS_REPORTS_PATH,
+    analyticsReportExportPathTemplate: env.FRESHSALES_ANALYTICS_REPORT_EXPORT_PATH_TEMPLATE,
+    analyticsExportStatusPathTemplate: env.FRESHSALES_ANALYTICS_EXPORT_STATUS_PATH_TEMPLATE,
     viewListCacheTtlMs: env.VIEW_LIST_CACHE_TTL_MS,
     viewFieldCoverageCacheTtlMs: env.VIEW_FIELD_COVERAGE_CACHE_TTL_MS,
     freshsalesRequestTimeoutMs: env.FRESHSALES_REQUEST_TIMEOUT_MS,

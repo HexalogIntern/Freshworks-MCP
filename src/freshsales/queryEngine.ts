@@ -5,6 +5,7 @@ import {
   fetchFieldSchema,
   fieldValueFor,
   hasFieldValueFor,
+  hydrateEntityChoiceLookups,
   isChoiceBackedField,
   mergeIncludes,
   relationIncludeForField,
@@ -82,6 +83,12 @@ export interface QueryRecordsResult {
   truncated: boolean;
 }
 
+export interface NativeCountResult {
+  total: number | null;
+  filters_applied: ResolvedCondition[];
+  native_filter_rules: Array<Array<Record<string, unknown>>>;
+}
+
 interface NativeFilterPayload {
   contacts?: unknown[];
   deals?: unknown[];
@@ -95,6 +102,10 @@ export async function queryRecords(
   options: QueryRecordsOptions
 ): Promise<QueryRecordsResult> {
   const schema = await fetchFieldSchema(ctx, options.entity);
+  await hydrateEntityChoiceLookups(ctx, options.entity, schema, [
+    ...options.groups.flatMap(group => group.conditions.map(condition => condition.field)),
+    ...(options.fields ?? [])
+  ]);
   const groups = normalizeGroups(options.groups);
   const resolvedGroups = groups.map(group => ({
     logic: group.logic,
@@ -170,6 +181,49 @@ export async function queryRecords(
     page: options.page,
     per_page: options.perPage,
     truncated
+  };
+}
+
+export async function countRecordsNatively(
+  ctx: ToolExecutionContext,
+  options: {
+    entity: FieldSchemaEntity;
+    groups: QueryGroupInput[];
+    extraRules?: Array<Record<string, unknown>>;
+  }
+): Promise<NativeCountResult> {
+  const schema = await fetchFieldSchema(ctx, options.entity);
+  await hydrateEntityChoiceLookups(ctx, options.entity, schema, [
+    ...options.groups.flatMap(group => group.conditions.map(condition => condition.field))
+  ]);
+  const groups = normalizeGroups(options.groups);
+  const resolvedGroups = groups.map(group => ({
+    logic: group.logic,
+    conditions: group.conditions.map(condition => resolveCondition(schema, condition))
+  }));
+
+  const canUseOneNativeCount = resolvedGroups.length === 0
+    || (resolvedGroups.length === 1 && resolvedGroups[0]?.logic === "and" && resolvedGroups[0].conditions.every(canRunNatively));
+  if (!canUseOneNativeCount) {
+    throw new AppError("UNSUPPORTED_NATIVE_COUNT", "This filter combination cannot be counted exactly with one Freshsales filtered_search request.");
+  }
+
+  const native = resolvedGroups[0]?.conditions ?? [];
+  const filterRule = [
+    ...native.map(condition => condition.nativeRule),
+    ...(options.extraRules ?? [])
+  ];
+
+  if (filterRule.length === 0) {
+    throw new AppError("UNSUPPORTED_NATIVE_COUNT", "Freshsales filtered_search requires at least one filter rule for native counts.");
+  }
+
+  const payload = await postFilteredSearch(ctx, options.entity, filterRule, 1, 1);
+
+  return {
+    total: numericTotal(payload.meta?.total),
+    filters_applied: resolvedGroups.flatMap(group => group.conditions.map(toResolvedCondition)),
+    native_filter_rules: [filterRule]
   };
 }
 

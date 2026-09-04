@@ -26,8 +26,8 @@ interface PersistedContactStatusCache {
 const cache = new Map<string, ContactStatusCacheEntry>();
 
 const statusEndpointCandidates = [
-  "api/settings/contact_statuses",
   "api/selector/contact_statuses",
+  "api/settings/contact_statuses",
   "api/settings/lifecycle_stages"
 ];
 

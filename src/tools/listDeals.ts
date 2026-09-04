@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { amountFromDeal, getCollection, linkedAccountFromDeal, linkedContactFromDeal, normalizedDealLifecycle, ownerNameFromRecord, stageNameFromDeal, weightedValueFromDeal } from "../freshsales/mappers.js";
-import { nativeFilteredSearch } from "../freshsales/nativeFilter.js";
+import { nativeFilteredSearch, type NativeFilterCondition } from "../freshsales/nativeFilter.js";
 import { scanView, scanViews } from "../freshsales/paginatedScan.js";
 import { dynamicRecordFromSchema, fetchFieldSchema, fieldValueFor, isFieldSchemaCacheMiss, mergeIncludes, relationIncludeForField, resolveFieldAlias, type FreshsalesFieldDefinition } from "../freshsales/fieldSchema.js";
 import { cachedViewsForFilter } from "../freshsales/viewCache.js";
@@ -100,6 +100,13 @@ export const listDealsTool = defineTool({
     const fieldSchema = await fetchFieldSchema(ctx, "deals");
     const filterResolution = params.filterBy ? resolveFieldAlias(fieldSchema, params.filterBy) : undefined;
     const filterField = filterResolution?.apiField;
+    if (shouldScan(params) && !canUseNativeFilter(params)) {
+      unsupportedNativeDealFilter(params);
+    }
+    const dateField = (params.dateFrom || params.dateTo) ? resolveFirstAvailableField(fieldSchema, ["close_date", "expected_close", "created_at"]) : undefined;
+    if ((params.dateFrom || params.dateTo) && !dateField) {
+      throw new AppError("UNKNOWN_FIELD", "No supported deal date field was found for date_from/date_to. Expected one of close_date, expected_close, or created_at.");
+    }
     const sortResolution = params.sortBy ? resolveFieldAlias(fieldSchema, params.sortBy) : undefined;
     const sortField = sortResolution?.apiField;
     const viewId = canUseNativeFilter(params)
@@ -115,7 +122,7 @@ export const listDealsTool = defineTool({
       relationIncludeForField(sortField?.name ?? "")
     );
     const rawDeals = canUseNativeFilter(params)
-      ? await nativeFilteredSearch(ctx, "deals", nativeDealConditions(params, filterField), {
+      ? await nativeFilteredSearch(ctx, "deals", nativeDealConditions(params, filterField, dateField), {
         page: params.page,
         perPage: params.perPage,
         sortField: nativeSort ? sortField?.name : undefined,
@@ -209,15 +216,13 @@ function shouldScanAllViews(params: ListDealsParams): boolean {
 }
 
 function canUseNativeFilter(params: ListDealsParams): boolean {
-  return Boolean(params.filterBy && !params.stage && !params.owner && !params.dateFrom && !params.dateTo);
+  return Boolean((params.filterBy || params.dateFrom || params.dateTo) && !params.stage && !params.owner);
 }
 
 function unsupportedNativeDealFilter(params: ListDealsParams): never {
   const unsupported = [
     params.stage ? "stage" : null,
-    params.owner ? "owner" : null,
-    params.dateFrom ? "date_from" : null,
-    params.dateTo ? "date_to" : null
+    params.owner ? "owner" : null
   ].filter(Boolean).join(", ");
   throw new AppError(
     "UNSUPPORTED_NATIVE_FILTER",
@@ -225,16 +230,38 @@ function unsupportedNativeDealFilter(params: ListDealsParams): never {
   );
 }
 
-function nativeDealConditions(params: ListDealsParams, filterField?: FreshsalesFieldDefinition) {
-  if (!filterField) {
-    return [];
+function nativeDealConditions(params: ListDealsParams, filterField?: FreshsalesFieldDefinition, dateField?: FreshsalesFieldDefinition): NativeFilterCondition[] {
+  const conditions: NativeFilterCondition[] = [];
+
+  if (filterField) {
+    if (!params.filterValue) {
+      throw new AppError("MISSING_FILTER_VALUE", "filter_value is required when filter_by is provided.");
+    }
+
+    conditions.push({ field: filterField, value: params.filterValue, matchMode: params.matchMode });
   }
 
-  if (!params.filterValue) {
-    throw new AppError("MISSING_FILTER_VALUE", "filter_value is required when filter_by is provided.");
+  if (dateField && params.dateFrom) {
+    conditions.push({ field: dateField, value: params.dateFrom, matchMode: "exact", operator: "is_after" });
   }
 
-  return [{ field: filterField, value: params.filterValue, matchMode: params.matchMode }];
+  if (dateField && params.dateTo) {
+    conditions.push({ field: dateField, value: params.dateTo, matchMode: "exact", operator: "is_before" });
+  }
+
+  return conditions;
+}
+
+function resolveFirstAvailableField(fields: FreshsalesFieldDefinition[], candidates: string[]): FreshsalesFieldDefinition | undefined {
+  for (const candidate of candidates) {
+    try {
+      return resolveFieldAlias(fields, candidate).apiField;
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
 }
 
 async function dealViewsForScan(ctx: ToolExecutionContext, filter?: { field?: string; value?: string }) {

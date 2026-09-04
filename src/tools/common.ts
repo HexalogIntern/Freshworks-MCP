@@ -66,17 +66,19 @@ export async function runTool<TInput extends ApprovalAwareInput, TResolved, TRes
       const approval = ctx.approvalStore.consume<TResolved>(parsedInput.request_id, definition.name, now);
       ctx.usageTracker.ensureCapacity(approval.estimatedCallCount, now);
 
-      const result = await definition.execute(approval.params, ctx);
+      const { result, usage } = await ctx.usageTracker.trackInvocation(definition.name, now, ctx.now, () => definition.execute(approval.params, ctx));
       ctx.logger.info("tool_call_executed", {
         tool: definition.name,
-        status: "success"
+        status: "success",
+        freshsales_call_count: usage.freshsales_call_count
       });
 
       return {
         payload: {
           ...result,
           _meta: {
-            fetched_at: now.toISOString()
+            fetched_at: now.toISOString(),
+            ...usage
           }
         },
         isError: false
