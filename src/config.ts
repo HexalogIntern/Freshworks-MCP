@@ -92,6 +92,13 @@ export function getConfig(): AppConfig {
 
   const env = parsed.data;
 
+  // Fail closed: without a bearer token or OAuth client, /mcp accepts any caller.
+  if (env.NODE_ENV === "production" && !env.MCP_SERVER_TOKEN && !(env.OAUTH_CLIENT_ID && env.OAUTH_CLIENT_SECRET)) {
+    throw new Error(
+      "Refusing to start in production without auth: set MCP_SERVER_TOKEN or both OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET."
+    );
+  }
+
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,

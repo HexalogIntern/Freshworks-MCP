@@ -23,7 +23,7 @@ export async function bootstrap() {
     usageTracker,
     logger
   });
-  void logFreshsalesSanityCheck(freshsales, logger);
+  void logFreshsalesSanityCheck(freshsales, logger, config.defaultContactsViewId);
 
   const context = {
     config,
@@ -64,10 +64,11 @@ export async function bootstrap() {
 
 async function logFreshsalesSanityCheck(
   freshsales: FreshsalesClient,
-  logger: ReturnType<typeof createLogger>
+  logger: ReturnType<typeof createLogger>,
+  viewId: string
 ): Promise<void> {
   try {
-    const payload = await freshsales.get<Record<string, unknown>>("api/contacts", {
+    const payload = await freshsales.get<Record<string, unknown>>(`api/contacts/view/${viewId}`, {
       query: {
         page: 1,
         per_page: 1
@@ -99,9 +100,7 @@ function contactCountFromPayload(payload: Record<string, unknown>): number | nul
 const isDirectRun = process.argv[1] ? fileURLToPath(import.meta.url) === process.argv[1] : false;
 
 if (isDirectRun) {
-  const { config, httpServer, close } = await bootstrap();
-
-  // Without these, an unhandled rejection or a synchronous throw outside
+  // Registered before bootstrap so config errors are logged too. Without these, an unhandled rejection or a synchronous throw outside
   // an Express handler crashes the process with nothing but Node's default
   // stderr dump - which Render's log pipeline was silently swallowing
   // (no request-level logs and no visible crash reason before restart).
@@ -126,6 +125,8 @@ if (isDirectRun) {
     }));
     process.exit(1);
   });
+
+  const { config, httpServer, close } = await bootstrap();
 
   httpServer.listen(config.port, () => {
     console.info(JSON.stringify({ level: "info", event: "server_started", port: config.port }));

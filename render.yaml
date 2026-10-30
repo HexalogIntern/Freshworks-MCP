@@ -1,7 +1,7 @@
 services:
   - type: web
     name: freshsales-mcp-server
-    env: node
+    runtime: node
     plan: free
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
@@ -9,6 +9,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: "22"
       - key: FRESHSALES_API_KEY
         sync: false
       - key: FRESHSALES_DOMAIN
