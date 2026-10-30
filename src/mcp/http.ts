@@ -24,6 +24,17 @@ export function createHttpApp({ config, logger, transport, oauthStore = new OAut
   app.use(express.json({ limit: "256kb", type: "application/json" }));
   app.use(express.urlencoded({ extended: false }));
 
+  app.use(requestLogging(logger));
+
+  // Mounted before host validation: Render's health probe and the keep-alive
+  // ping don't send the public Host header, and a 403 here stalls the deploy.
+  app.get("/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      server_time: new Date().toISOString()
+    });
+  });
+
   if (config.allowedHosts.length > 0) {
     app.use(hostHeaderValidation(config.allowedHosts));
   }
@@ -36,15 +47,6 @@ export function createHttpApp({ config, logger, transport, oauthStore = new OAut
     }
 
     next();
-  });
-
-  app.use(requestLogging(logger));
-
-  app.get("/health", (_req, res) => {
-    res.json({
-      status: "ok",
-      server_time: new Date().toISOString()
-    });
   });
 
   app.get("/.well-known/oauth-authorization-server", (req, res) => {
