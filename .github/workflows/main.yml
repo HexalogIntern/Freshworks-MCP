@@ -10,4 +10,4 @@ jobs:
     steps:
       - name: Ping Render Service
         run: |
-          curl -sS https://freshsales-mcp-server-2v7b.onrender.com/health || true
+          curl -sS https://freshsales-mcp-server-82li.onrender.com/health || true
