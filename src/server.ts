@@ -128,8 +128,10 @@ if (isDirectRun) {
 
   const { config, httpServer, close } = await bootstrap();
 
-  httpServer.listen(config.port, () => {
-    console.info(JSON.stringify({ level: "info", event: "server_started", port: config.port }));
+  // Bind IPv4 on all interfaces explicitly, as Render's port scan and health
+  // probe expect; the default dual-stack "::" bind can be unreachable there.
+  httpServer.listen(config.port, "0.0.0.0", () => {
+    console.info(JSON.stringify({ level: "info", event: "server_started", port: config.port, host: "0.0.0.0" }));
   });
 
   const shutdown = async (signal: string) => {
